@@ -50,7 +50,12 @@ impl HmvSession {
 /// Logs in using stored credentials and returns the authenticated session.
 pub async fn login(cfg: &ConfigManager) -> Result<HmvSession> {
     let (username, password) = cfg.load_credentials()?;
+    login_with(&username, &password).await
+}
 
+/// Logs in with explicit credentials (used by the TUI first-run config popup,
+/// where the credentials are not stored yet or no longer work).
+pub async fn login_with(username: &str, password: &str) -> Result<HmvSession> {
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
@@ -62,7 +67,7 @@ pub async fn login(cfg: &ConfigManager) -> Result<HmvSession> {
 
     let resp = client
         .post(format!("{BASE_URL}{LOGIN_PATH}"))
-        .form(&[("admin", username.as_str()), ("password_usuario", password.as_str())])
+        .form(&[("admin", username), ("password_usuario", password)])
         .send()
         .await
         .context("Connection error")?;

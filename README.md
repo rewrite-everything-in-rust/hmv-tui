@@ -55,7 +55,9 @@ cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git
 
 ## Initial Configuration
 
-After installation, you must run the configuration command to save your account:
+Just run `hmv` — on first run the dashboard opens straight into a configuration popup where you enter your HackMyVM username and password. The credentials are validated by logging in, then stored.
+
+You can also configure from the command line at any time:
 
 ```bash
 hmv config
@@ -71,7 +73,7 @@ hmv config
 
 | Command | Function |
 | :--- | :--- |
-| `hmv` | Show banner and help menu. |
+| `hmv` | Launch the interactive dashboard (first run opens an in-TUI configuration popup). |
 | `hmv stats` | Show your personal stats: rank, points, trophies and progress. |
 | `hmv machine -l` | Show the latest 20 machines from HackMyVM. |
 | `hmv machine -a` | Show the entire machine catalog in one large table. |
@@ -120,7 +122,7 @@ hmv machine -r
 hmv tui
 ```
 
-Three tabs driven entirely by the keyboard:
+Five tabs driven entirely by the keyboard:
 
 | Keys | Action |
 | :--- | :--- |

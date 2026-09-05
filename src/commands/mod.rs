@@ -9,10 +9,11 @@ use console::style;
 use crate::cli::{Cli, MachineArgs};
 use crate::config::{self, ConfigManager};
 use crate::download::DownloadManager;
+use crate::modules::HmvError;
 use crate::modules::flag::FlagManager;
 use crate::modules::machines::MachineScraper;
 use crate::modules::releases::ReleaseScraper;
-use crate::modules::session::{login, HmvSession};
+use crate::modules::session::{login, login_with, HmvSession};
 use crate::modules::stats::{ProfileStats, StatsManager};
 use crate::modules::writeups::WriteupManager;
 use crate::tui::{ActionReport, TuiAction, TuiData};
@@ -20,6 +21,7 @@ use crate::tui::{ActionReport, TuiAction, TuiData};
 /// Reusable authenticated session for the TUI's lifetime. Cloning an
 /// `HmvSession` is cheap (shared connection pool), so one login serves
 /// every background action.
+#[derive(Clone)]
 pub struct SessionCache {
     session: HmvSession,
     username: String,
@@ -38,30 +40,101 @@ impl SessionCache {
     }
 }
 
+/// Session slot shared by all TUI closures; `None` until the first-run
+/// config popup succeeds.
+type SharedSession = std::sync::Arc<std::sync::Mutex<Option<SessionCache>>>;
+
+fn take_session(shared: &SharedSession) -> Result<SessionCache> {
+    shared
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Not configured — no HackMyVM session available."))
+}
+
 pub async fn tui_cmd() -> Result<()> {
-    // Enter the TUI instantly with an empty state; the first fetch runs
-    // inside the event loop with a `⟳ Loading data...` indicator.
-    let sessions = SessionCache::new().await?;
+    // Bare `hmv` / `hmv tui`: without usable stored credentials the TUI
+    // starts directly in the first-run config popup; otherwise log in now
+    // and enter the dashboard with an empty state (first fetch runs inside
+    // the event loop with a `⟳ Loading data...` indicator).
+    let cfg = ConfigManager::new();
+    let stored_username = cfg.stored_username();
+    let sessions = if stored_username.is_some() {
+        match SessionCache::new().await {
+            Ok(sessions) => Some(sessions),
+            Err(error)
+                if error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<HmvError>().is_some_and(|e| matches!(e, HmvError::AuthFailed))) =>
+            {
+                // Stale password: offer re-configuration inside the TUI.
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let unconfigured = sessions.is_none();
+
+    let shared: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(sessions));
+    let fetch_sessions = shared.clone();
+    let action_sessions = shared.clone();
+    let writeups_sessions = shared.clone();
+    let config_sessions = shared.clone();
+
+    let initial = if unconfigured {
+        crate::tui::AppState::unconfigured(stored_username.as_deref())
+    } else {
+        crate::tui::AppState::loading()
+    };
+
     crate::tui::run(
-        crate::tui::AppState::loading(),
-        || {
+        initial,
+        move || {
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(fetch_tui_data(&sessions))
+                tokio::runtime::Handle::current().block_on(async {
+                    let sessions = take_session(&fetch_sessions)?;
+                    fetch_tui_data(&sessions).await
+                })
             })
         },
-        |action| {
+        move |action| {
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(run_tui_action(&sessions, action))
+                tokio::runtime::Handle::current().block_on(async {
+                    let sessions = take_session(&action_sessions)?;
+                    run_tui_action(&sessions, action).await
+                })
             })
         },
-        |vm| {
+        move |vm| {
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    WriteupManager::new(sessions.session()).fetch(vm),
-                )
+                tokio::runtime::Handle::current().block_on(async {
+                    let sessions = take_session(&writeups_sessions)?;
+                    WriteupManager::new(sessions.session()).fetch(vm).await
+                })
+            })
+        },
+        move |username, password| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(configure_account(&config_sessions, username, password))
             })
         },
     )
+}
+
+/// Validates the entered credentials by logging in, stores them, and
+/// installs the session for the rest of the dashboard lifetime. Only called
+/// from the first-run config popup.
+async fn configure_account(shared: &SharedSession, username: &str, password: &str) -> Result<()> {
+    let session = login_with(username, password).await?;
+    ConfigManager::new().save_credentials(username, password)?;
+    *shared.lock().unwrap() = Some(SessionCache {
+        session,
+        username: username.to_string(),
+    });
+    Ok(())
 }
 
 /// Executes a user action from a TUI popup. Returns the result popup
@@ -69,11 +142,16 @@ pub async fn tui_cmd() -> Result<()> {
 /// `changed` telling whether dashboard data must be refreshed after the
 /// popup closes.
 async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<ActionReport> {
-    if action.kind == crate::tui::PopupKind::Download {
-        anyhow::bail!("downloads are spawned directly, not through run_action");
+    if matches!(
+        action.kind,
+        crate::tui::PopupKind::Download | crate::tui::PopupKind::Config
+    ) {
+        anyhow::bail!("downloads and configuration are handled directly by the event loop");
     }
     match action.kind {
-        crate::tui::PopupKind::Download => unreachable!("handled by the event loop"),
+        crate::tui::PopupKind::Download | crate::tui::PopupKind::Config => {
+            unreachable!("handled by the event loop")
+        }
         crate::tui::PopupKind::Flag => {
             use crate::modules::flag::FlagVerdict;
 

@@ -397,6 +397,11 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
             vec!["Save to:"],
             "Enter start · Esc cancel",
         ),
+        PopupKind::Config => (
+            " Configure HackMyVM ".to_string(),
+            vec!["Username:", "Password:"],
+            "Enter save & connect · ↑↓/Tab switch field · Esc quit",
+        ),
     };
 
     let mut lines = Vec::new();
@@ -410,7 +415,13 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     for (index, prompt) in prompts.iter().enumerate() {
         let active = index == popup.field;
         let marker = if active { "▏" } else { "" };
-        let buffer = popup.buffers.get(index).map(String::as_str).unwrap_or("");
+        let raw = popup.buffers.get(index).map(String::as_str).unwrap_or("");
+        let buffer = if popup.kind == PopupKind::Config && index == 1 {
+            // Mask the password field.
+            "•".repeat(raw.chars().count())
+        } else {
+            raw.to_string()
+        };
         let style = if active {
             Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
         } else {
@@ -712,7 +723,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     .areas(area);
 
     let keys: String = if app.popup.is_some() {
-        "Enter send · ↑↓/Tab switch field · Esc cancel".to_string()
+        match app.popup.as_ref().map(|p| p.kind) {
+            Some(PopupKind::Config) => "Enter save & connect · Esc quit".to_string(),
+            _ => "Enter send · ↑↓/Tab switch field · Esc cancel".to_string(),
+        }
     } else {
         match app.input_mode {
             InputMode::Filter => "Enter confirm · Esc clear & exit filter".to_string(),

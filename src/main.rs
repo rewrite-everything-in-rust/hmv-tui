@@ -8,7 +8,7 @@ mod modules;
 mod tui;
 mod ui;
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use console::style;
 
 use crate::cli::{Cli, Commands};
@@ -25,10 +25,8 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        None => {
-            println!("{}", banner::get_banner());
-            Cli::command().print_help()?;
-        }
+        // Bare `hmv` is the dashboard (v0.7.0); subcommands stay for scripting.
+        None => commands::tui_cmd().await?,
         Some(Commands::Config) => commands::config_cmd().await?,
         Some(Commands::Stats) => {
             println!("{}", banner::get_banner());

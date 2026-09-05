@@ -25,6 +25,8 @@ pub enum PopupKind {
     Flag,
     Upload,
     Download,
+    /// First-run credentials popup (`hmv` without a stored account).
+    Config,
 }
 
 /// A text-input popup bound to one machine. The Flag popup carries two
@@ -205,6 +207,9 @@ pub struct AppState {
     pub input_mode: InputMode,
     /// Downloads overlay visibility (`o`).
     pub view: ViewMode,
+    /// True while no usable session exists (first run or stale password);
+    /// the config popup is then the only way forward.
+    pub needs_config: bool,
     /// Background download jobs (newest last). Shared with the renderer.
     pub download_jobs: Vec<std::sync::Arc<downloads::DownloadJob>>,
     /// First `q` with active downloads only sets this; second quits.
@@ -249,6 +254,7 @@ impl AppState {
             tab: Tab::Stats,
             input_mode: InputMode::Normal,
             view: ViewMode::Normal,
+            needs_config: false,
             download_jobs: Vec::new(),
             quit_warned: false,
             filter: String::new(),
@@ -275,6 +281,15 @@ impl AppState {
     pub fn loading() -> Self {
         let mut state = Self::new(TuiData::empty());
         state.fetching = Some("Loading data...".to_string());
+        state
+    }
+
+    /// Entry state for bare `hmv` with no usable stored credentials: opens
+    /// straight into the configuration popup.
+    pub fn unconfigured(stored_username: Option<&str>) -> Self {
+        let mut state = Self::new(TuiData::empty());
+        state.needs_config = true;
+        state.open_config_popup(stored_username);
         state
     }
 
@@ -462,9 +477,15 @@ impl AppState {
         if self.popup.is_some() {
             return;
         }
+        if kind == PopupKind::Config {
+            // Config popups are managed by the startup path and the event
+            // loop (first run / failed login), never opened ad hoc.
+            return;
+        }
         let allowed = match kind {
             PopupKind::Flag | PopupKind::Download => self.tab == Tab::Machines,
             PopupKind::Upload => self.tab == Tab::Pending,
+            PopupKind::Config => false, // managed by the startup path / event loop
         };
         if !allowed {
             self.set_status(match kind {
@@ -477,6 +498,7 @@ impl AppState {
                 PopupKind::Download => {
                     "Downloads are only available on the Machines tab."
                 }
+                PopupKind::Config => return, // never opened ad hoc
             });
             return;
         }
@@ -544,6 +566,26 @@ impl AppState {
         });
     }
 
+    /// Opens the credentials popup used on first run (or after a failed
+    /// login). Prefills the username when one is stored on disk.
+    pub fn open_config_popup(&mut self, stored_username: Option<&str>) {
+        if self.popup.is_some() {
+            return;
+        }
+        let notice = match stored_username {
+            Some(_) => "Login failed — re-enter your HackMyVM credentials.",
+            None => "First run — enter your HackMyVM account.",
+        };
+        self.popup = Some(Popup {
+            kind: PopupKind::Config,
+            vm: String::new(),
+            buffers: vec![stored_username.unwrap_or_default().to_string(), String::new()],
+            field: 0,
+            notice: Some(notice.to_string()),
+            readonly: false,
+        });
+    }
+
     /// Queues a writeups fetch for the selected machine; the event loop
     /// runs the (blocking) fetch, then opens the popup. Gated to the
     /// Machines and Pending tabs.
@@ -606,6 +648,21 @@ impl AppState {
             .filter(|(_, v)| !v.is_empty())
             .collect();
 
+        if popup.kind == PopupKind::Config {
+            if values.len() < 2 {
+                self.popup = Some(popup);
+                self.set_status("Username and password are required.");
+                return;
+            }
+            self.set_status("Connecting...");
+            self.pending_action = Some(TuiAction {
+                kind: popup.kind,
+                vm: popup.vm,
+                values,
+            });
+            return;
+        }
+
         if values.is_empty() {
             self.set_status("Cancelled — empty input.");
             return;
@@ -642,6 +699,7 @@ impl AppState {
             }
             PopupKind::Upload => "writeup URL",
             PopupKind::Download => "download",
+            PopupKind::Config => "credentials", // handled above
         };
         self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
         self.pending_action = Some(TuiAction {
@@ -808,12 +866,14 @@ pub fn build_flag_report(vm: &str, results: Vec<(usize, FlagVerdict)>) -> Action
 /// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on
 /// demand; `run_action` executes a user action (flag/upload) and returns an
 /// `ActionReport` for the result popup; `run_writeups_fetch` fetches the
-/// community writeups for a machine (blocking, network-only).
+/// community writeups for a machine (blocking, network-only);
+/// `run_config` validates and stores first-run credentials.
 pub fn run(
     mut app: AppState,
     refetch: impl Fn() -> Result<TuiData>,
     run_action: impl Fn(TuiAction) -> Result<ActionReport>,
     run_writeups_fetch: impl Fn(&str) -> Result<Vec<Writeup>>,
+    run_config: impl Fn(&str, &str) -> Result<()>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     // Kick off the first load (and any pending request) before looping.
@@ -824,6 +884,7 @@ pub fn run(
         &refetch,
         &run_action,
         &run_writeups_fetch,
+        &run_config,
         &mut pending_fetch,
     );
     ratatui::restore();
@@ -836,6 +897,7 @@ fn event_loop(
     refetch: &dyn Fn() -> Result<TuiData>,
     run_action: &dyn Fn(TuiAction) -> Result<ActionReport>,
     run_writeups_fetch: &dyn Fn(&str) -> Result<Vec<Writeup>>,
+    run_config: &dyn Fn(&str, &str) -> Result<()>,
     pending_fetch: &mut bool,
 ) -> Result<()> {
     loop {
@@ -851,37 +913,68 @@ fn event_loop(
 
         app.tick();
 
-        // User actions from popups (flag submission, writeup upload).
+        // User actions from popups (config, flag submission, writeup upload,
+        // download start).
         if let Some(action) = app.pending_action.take() {
-            if action.kind == PopupKind::Download {
-                // Non-blocking: spawn a background job and move on.
-                let dir = PathBuf::from(action.values[0].1.clone());
-                match downloads::start_download(action.vm.clone(), dir) {
-                    Ok(job) => {
-                        app.set_status(format!("[↓] Download {} started.", action.vm));
-                        app.download_jobs.push(std::sync::Arc::new(job));
+            match action.kind {
+                PopupKind::Download => {
+                    // Non-blocking: spawn a background job and move on.
+                    let dir = PathBuf::from(action.values[0].1.clone());
+                    match downloads::start_download(action.vm.clone(), dir) {
+                        Ok(job) => {
+                            app.set_status(format!("[↓] Download {} started.", action.vm));
+                            app.download_jobs.push(std::sync::Arc::new(job));
+                        }
+                        Err(error) => app.set_status(format!("Download failed: {error:#}")),
                     }
-                    Err(error) => app.set_status(format!("Download failed: {error:#}")),
                 }
-            } else {
-                let label = match action.kind {
-                    PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
-                    PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
-                    PopupKind::Download => unreachable!("handled above"),
-                };
-                app.fetching = Some(label);
-                terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+                PopupKind::Config => {
+                    let value = |field: usize| {
+                        action
+                            .values
+                            .iter()
+                            .find(|(f, _)| *f == field)
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_default()
+                    };
+                    let (username, password) = (value(0), value(1));
+                    app.fetching = Some(format!("Connecting as {username}..."));
+                    terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
-                match run_action(action) {
-                    Ok(report) => {
-                        // Footer shows a 5s summary; the popup persists.
-                        app.set_status(report.status.clone());
-                        app.pending_refresh_after_close = report.changed;
-                        app.report = Some(report);
+                    match run_config(&username, &password) {
+                        Ok(()) => {
+                            app.fetching = None;
+                            app.needs_config = false;
+                            app.set_status(format!("[✓] Connected as {username} — loading data..."));
+                            *pending_fetch = true;
+                        }
+                        Err(error) => {
+                            app.fetching = None;
+                            app.set_status(format!("Configuration failed: {error:#}"));
+                            app.open_config_popup(Some(&username));
+                        }
                     }
-                    Err(error) => app.set_status(format!("Action failed: {error:#}")),
                 }
-                app.fetching = None;
+                PopupKind::Flag | PopupKind::Upload => {
+                    let label = match action.kind {
+                        PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
+                        PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
+                        _ => unreachable!("handled above"),
+                    };
+                    app.fetching = Some(label);
+                    terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+                    match run_action(action) {
+                        Ok(report) => {
+                            // Footer shows a 5s summary; the popup persists.
+                            app.set_status(report.status.clone());
+                            app.pending_refresh_after_close = report.changed;
+                            app.report = Some(report);
+                        }
+                        Err(error) => app.set_status(format!("Action failed: {error:#}")),
+                    }
+                    app.fetching = None;
+                }
             }
         }
 
@@ -1010,8 +1103,14 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
         }
         match key.code {
             KeyCode::Esc => {
+                let is_config = app.popup.as_ref().map(|p| p.kind) == Some(PopupKind::Config);
                 app.popup = None;
-                app.set_status("Cancelled.");
+                if is_config {
+                    // Nothing else to do without an account — leave.
+                    app.quit = true;
+                } else {
+                    app.set_status("Cancelled.");
+                }
             }
             KeyCode::Enter => app.confirm_popup(),
             KeyCode::Backspace => {
@@ -1658,6 +1757,52 @@ mod tests {
             crossterm::event::KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::empty()),
         );
         assert!(state.quit);
+    }
+
+    #[test]
+    fn unconfigured_opens_config_popup() {
+        let state = AppState::unconfigured(Some("demouser"));
+        assert!(state.needs_config);
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Config);
+        assert_eq!(popup.buffers[0], "demouser");
+        assert!(popup.buffers[1].is_empty(), "password never prefilled");
+        assert!(popup.notice.is_some());
+        assert!(state.data.stats.accepted_writeups.is_empty());
+    }
+
+    #[test]
+    fn config_popup_requires_both_fields() {
+        let mut state = AppState::unconfigured(None);
+        state.popup.as_mut().unwrap().buffers[0] = "someuser".into();
+        state.confirm_popup();
+
+        // Popup stays open, nothing queued, error shown.
+        assert!(state.pending_action.is_none());
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Config);
+        assert_eq!(popup.buffers[0], "someuser");
+
+        // Both fields filled -> credentials queued in field order.
+        state.popup.as_mut().unwrap().buffers[1] = "hunter2".into();
+        state.confirm_popup();
+        let action = state.pending_action.take().unwrap();
+        assert_eq!(action.kind, PopupKind::Config);
+        assert_eq!(
+            action.values,
+            vec![(0, "someuser".to_string()), (1, "hunter2".to_string())]
+        );
+    }
+
+    #[test]
+    fn config_popup_esc_quits() {
+        let mut state = AppState::unconfigured(None);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert!(state.quit);
+        assert!(state.popup.is_none());
     }
 
     #[test]

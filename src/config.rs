@@ -96,6 +96,11 @@ impl ConfigManager {
         Ok(())
     }
 
+    /// Stored username, if any (used to prefill the first-run config popup).
+    pub fn stored_username(&self) -> Option<String> {
+        self.read_username().ok()
+    }
+
     /// Loads the username from disk and the password from the OS vault.
     pub fn load_credentials(&self) -> Result<(String, String)> {
         let username = self.read_username()?;
