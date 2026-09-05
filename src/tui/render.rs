@@ -635,8 +635,8 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     let [keys_area, status_area] = Layout::horizontal([
+        Constraint::Min(80),
         Constraint::Fill(1),
-        Constraint::Max(60),
     ])
     .areas(area);
 
@@ -648,16 +648,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
             InputMode::Normal => {
                 let list_keys = match app.tab {
                     Tab::Stats => String::new(),
-                    Tab::Writeups => "↑↓/jk move · / filter · Enter open · ".to_string(),
-                    Tab::Pending => "↑↓/jk move · / filter · u writeup · ".to_string(),
-                    Tab::Machines => "↑↓/jk move · / filter · f flag (user+root) · ".to_string(),
-                    Tab::Releases => "↑↓/jk move · / filter · ".to_string(),
+                    Tab::Writeups => "jk move · / filter · Enter open · ".to_string(),
+                    Tab::Pending => "jk move · / filter · u writeup · ".to_string(),
+                    Tab::Machines => "jk move · / filter · f flag · d download · ".to_string(),
+                    Tab::Releases => "jk move · / filter · ".to_string(),
                 };
                 let common = "r refresh · q quit";
                 if list_keys.is_empty() {
-                    format!("Tab tabs · {common}")
+                    format!("Tab switch · {common}")
                 } else {
-                    format!("Tab tabs · {list_keys}{common}")
+                    format!("Tab · {list_keys}{common}")
                 }
             }
         }
