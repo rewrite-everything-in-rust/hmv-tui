@@ -39,7 +39,7 @@ Nord-themed interface, color-coded difficulties, live progress gauges and an acc
 
 ## Prerequisites
 
-* **OS**: Linux (primary target), macOS and Windows builds are provided as release binaries.
+* **OS**: Linux (primary target — **developed and tested on Arch Linux**), macOS and Windows builds are provided as release binaries.
 * An active account on [HackMyVM](https://hackmyvm.eu/).
 * A Secret Service provider on Linux (e.g. GNOME Keyring / KWallet) for credential storage.
 
@@ -62,6 +62,12 @@ Grab the archive for your platform from the [Releases](https://github.com/setyan
 tar xzf hmv-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
 install -m 755 hmv ~/.local/bin/hmv
 ```
+
+> **Arch Linux** — HMV-TUI is developed and tested on Arch. The Linux release binary is built on Ubuntu, but runs on Arch out of the box; just make sure a Secret Service provider is installed for credential storage:
+>
+> ```bash
+> sudo pacman -S --needed gnome-keyring
+> ```
 
 ### 2. From source
 
