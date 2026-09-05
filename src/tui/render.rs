@@ -548,7 +548,9 @@ fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
         .collect();
 
     let height = (popup.entries.len() as u16 + 3).clamp(6, 18);
-    let box_area = popup_area(area, 92, height);
+    // Nearly full terminal width so long writeup links stay readable.
+    let width = area.width.saturating_sub(4).max(60);
+    let box_area = popup_area(area, width, height);
     frame.render_widget(Clear, box_area);
 
     let header = Row::new(["Date", "Author (Poet)", "Language", "Format", "Link"])
