@@ -10,7 +10,8 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use super::{
-    ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab,
+    ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab, ViewMode,
+    downloads::Phase,
 };
 
 const ACCENT: Color = Color::Rgb(117, 206, 122);
@@ -38,6 +39,9 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
 
     draw_footer(frame, footer, app);
 
+    if app.view == ViewMode::Downloads && app.popup.is_none() && app.report.is_none() {
+        draw_downloads(frame, frame.area(), app);
+    }
     if let Some(popup) = &app.popup {
         draw_popup(frame, frame.area(), popup);
     }
@@ -383,6 +387,11 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
             vec!["Writeup URL:"],
             "Enter send · Esc cancel",
         ),
+        PopupKind::Download => (
+            format!(" Download — {} ", popup.vm),
+            vec!["Save to:"],
+            "Enter start · Esc cancel",
+        ),
     };
 
     let mut lines = Vec::new();
@@ -515,6 +524,113 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
+    let jobs = app.download_jobs.len();
+    let height = (jobs as u16 + 5).clamp(6, 16);
+    let box_area = popup_area(area, 96, height);
+    frame.render_widget(Clear, box_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if jobs == 0 {
+        lines.push(Line::from(Span::styled(
+            "No downloads yet — press d on a machine.",
+            Style::new().dim(),
+        )));
+    }
+
+    let selected_index = if app.view == ViewMode::Downloads {
+        app.download_selected()
+    } else {
+        usize::MAX
+    };
+
+    for (index, job) in app.download_jobs.iter().enumerate() {
+        // Lock once and read everything through the guard: `is_active()`
+        // and `download_selected()` would re-lock the same non-reentrant
+        // std::Mutex while the guard is alive — self-deadlock.
+        let state = job.state.lock().unwrap();
+        let active = matches!(state.phase, Phase::Resolving | Phase::Downloading);
+        let selected = index == selected_index;
+        let marker = if selected && active {
+            Span::styled("c ", Style::new().fg(WARN).bold())
+        } else {
+            Span::raw("  ")
+        };
+
+        let line = match state.phase {
+            Phase::Resolving => Line::from(vec![
+                marker,
+                Span::styled(
+                    format!("… {}  resolving MEGA link…", job.vm),
+                    Style::new().dim(),
+                ),
+            ]),
+            Phase::Downloading => {
+                let ratio = if state.total > 0 {
+                    state.downloaded as f64 / state.total as f64
+                } else {
+                    0.0
+                };
+                let filled = (ratio * 24.0).round() as usize;
+                let bar = format!(
+                    "[{}{}]",
+                    "█".repeat(filled),
+                    "░".repeat(24usize.saturating_sub(filled))
+                );
+                Line::from(vec![
+                    marker,
+                    Span::styled(format!("↓ {:<12}", job.vm), Style::new().fg(ACCENT).bold()),
+                    Span::styled(format!("{bar} "), Style::new().fg(ACCENT)),
+                    Span::styled(
+                        format!(
+                            "{}/{} · {}/s",
+                            super::downloads::fmt_bytes(state.downloaded),
+                            super::downloads::fmt_bytes(state.total),
+                            super::downloads::fmt_bytes(state.speed_bps),
+                        ),
+                        Style::new().fg(Color::White),
+                    ),
+                ])
+            }
+            Phase::Done => Line::from(vec![
+                Span::raw("  "),
+                Span::styled("✓ ", Style::new().fg(Color::Green).bold()),
+                Span::styled(
+                    format!("{} → {}", job.vm, state.message),
+                    Style::new().fg(Color::Green),
+                ),
+            ]),
+            Phase::Failed => Line::from(vec![
+                Span::raw("  "),
+                Span::styled("✗ ", Style::new().fg(Color::Red).bold()),
+                Span::styled(
+                    format!("{}: {}", job.vm, state.message),
+                    Style::new().fg(Color::Red),
+                ),
+            ]),
+            Phase::Cancelled => Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("• {} cancelled", job.vm), Style::new().dim()),
+            ]),
+        };
+        lines.push(line);
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "o close (downloads keep running) · c cancel latest · q quit warns while active",
+        Style::new().dim(),
+    )));
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Downloads ",
+            Style::new().fg(WARN).bold(),
+        ))
+        .border_style(Style::new().fg(WARN));
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {

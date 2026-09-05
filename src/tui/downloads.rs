@@ -1,0 +1,244 @@
+//! Background download jobs for the TUI. Each job runs on the tokio
+//! runtime and reports through shared state the renderer reads directly —
+//! no terminal output, no channel loss. The event loop owns starting,
+//! queueing (max 2 parallel) and cancelling.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+
+use crate::mega::{self, DownloadHooks};
+
+/// At most two VM archives are pulled from MEGA in parallel.
+pub const PARALLEL_DOWNLOADS: usize = 2;
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Resolving,
+    Downloading,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Live progress, shared between the download task and the renderer.
+#[derive(Debug)]
+pub struct DownloadState {
+    pub phase: Phase,
+    pub downloaded: u64,
+    pub total: u64,
+    pub speed_bps: u64,
+    pub message: String,
+    pub part_path: Option<PathBuf>,
+    last_bytes: u64,
+    last_time: Option<Instant>,
+}
+
+impl Default for DownloadState {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Resolving,
+            downloaded: 0,
+            total: 0,
+            speed_bps: 0,
+            message: String::new(),
+            part_path: None,
+            last_bytes: 0,
+            last_time: None,
+        }
+    }
+}
+
+impl DownloadState {
+    fn note_progress(&mut self, bytes: u64) {
+        let now = Instant::now();
+        if let Some(last) = self.last_time {
+            let dt = now.duration_since(last).as_secs_f64();
+            if dt >= 0.25 {
+                self.speed_bps =
+                    (bytes.saturating_sub(self.last_bytes) as f64 / dt) as u64;
+                self.last_bytes = bytes;
+                self.last_time = Some(now);
+            }
+        } else {
+            self.last_time = Some(now);
+        }
+        self.downloaded = bytes;
+    }
+}
+
+#[derive(Debug)]
+pub struct DownloadJob {
+    #[allow(dead_code)] // identifies the job; kept for future introspection
+    pub id: u64,
+    pub vm: String,
+    #[allow(dead_code)] // shown in the Done message path; kept for reference
+    pub dest_dir: PathBuf,
+    pub state: Arc<Mutex<DownloadState>>,
+    pub cancel: Arc<AtomicBool>,
+    /// `None` only in unit tests; real jobs carry their spawned handle.
+    #[allow(dead_code)]
+    pub handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DownloadJob {
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.state.lock().unwrap().phase,
+            Phase::Resolving | Phase::Downloading
+        )
+    }
+
+    /// Requests cancellation; the task cleans up its `.part` file.
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Best-effort `.part` cleanup used when quitting with active jobs.
+    pub fn remove_part(&self) {
+        if let Some(part) = self.state.lock().unwrap().part_path.clone() {
+            let _ = std::fs::remove_file(part);
+        }
+    }
+}
+
+/// Persists the destination choice and spawns the download task.
+pub fn start_download(vm: String, dest_dir: PathBuf) -> Result<DownloadJob> {
+    crate::config::ConfigManager::new().save_download_dir(&dest_dir)?;
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("Cannot create download directory {}", dest_dir.display()))?;
+
+    let state = Arc::new(Mutex::new(DownloadState::default()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+    let task_state = state.clone();
+    let task_cancel = cancel.clone();
+    let task_vm = vm.clone();
+    let task_dest = dest_dir.clone();
+    let handle = tokio::spawn(async move {
+        let vm = task_vm;
+        let dest_dir = task_dest;
+        let hooks = DownloadHooks {
+            cancel: &task_cancel,
+            on_metadata: &|total, _name| {
+                let mut s = task_state.lock().unwrap();
+                s.total = total;
+                s.phase = Phase::Downloading;
+            },
+            on_progress: &|bytes| {
+                task_state.lock().unwrap().note_progress(bytes);
+            },
+            on_part: &|part| {
+                task_state.lock().unwrap().part_path = Some(part.to_path_buf());
+            },
+        };
+
+        let outcome = async {
+            let url = crate::download::resolve_mega_link(&vm).await?;
+            mega::download_public(&url, &dest_dir, &hooks).await
+        }
+        .await;
+
+        let mut s = task_state.lock().unwrap();
+        match outcome {
+            Ok(path) => {
+                s.phase = Phase::Done;
+                s.message = path.display().to_string();
+            }
+            Err(error) => {
+                if task_cancel.load(Ordering::Relaxed) {
+                    s.phase = Phase::Cancelled;
+                } else {
+                    s.phase = Phase::Failed;
+                    s.message = format!("{error:#}");
+                }
+            }
+        }
+    });
+
+    Ok(DownloadJob {
+        id,
+        vm,
+        dest_dir,
+        state,
+        cancel,
+        handle: Some(handle),
+    })
+}
+
+/// Human-readable byte size: "0 B", "842.1 KB", "1.9 GB", ...
+pub fn fmt_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_bytes_picks_units() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KB");
+        assert_eq!(fmt_bytes(1_966_080), "1.9 MB");
+        assert_eq!(fmt_bytes(2_038_433_792), "1.9 GB");
+    }
+
+    #[test]
+    fn job_defaults_to_resolving_and_can_be_cancelled() {
+        let job = DownloadJob {
+            id: 1,
+            vm: "Arcane".into(),
+            dest_dir: PathBuf::from("/tmp"),
+            state: Arc::new(Mutex::new(DownloadState::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        };
+        assert!(job.is_active());
+        job.request_cancel();
+        // Flag is set even though no task consumed it yet.
+        // Phase only changes once the (absent) task observes it.
+        assert!(job.is_active());
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore] // network test: cargo test download_task_completes -- --ignored --nocapture
+    async fn download_task_completes() {
+        let dir = PathBuf::from("/tmp/opencode/tuidl");
+        let _ = std::fs::create_dir_all(&dir);
+        let job = start_download("Flute".into(), dir).unwrap();
+        for _ in 0..240 {
+            if !job.is_active() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let s = job.state.lock().unwrap();
+        panic!(
+            "phase={:?} downloaded={} total={} msg={} part={:?}",
+            s.phase, s.downloaded, s.total, s.message, s.part_path
+        );
+    }
+}

@@ -3,6 +3,7 @@
 //! (hmv/modules/download.py) and extended with concurrent batch downloads.
 
 use anyhow::{bail, Context, Result};
+use std::sync::atomic::AtomicBool;
 use console::style;
 use futures_util::stream;
 use futures_util::StreamExt;
@@ -100,37 +101,7 @@ impl DownloadManager {
         multi: &MultiProgress,
         bar: Option<indicatif::ProgressBar>,
     ) -> Result<PathBuf> {
-        let resolve_url = format!(
-            "https://downloads.hackmyvm.eu/{}.zip",
-            vm_name.to_lowercase()
-        );
-
-        // Resolve the redirect manually: reqwest strips the `#key` fragment
-        // from Location URLs while following redirects, but the MEGA key
-        // lives exactly in that fragment.
-        let resolver = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .context("Failed to build HTTP client")?;
-        let response = resolver
-            .get(&resolve_url)
-            .send()
-            .await
-            .context("Connection error")?;
-        let resolved = match response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-        {
-            Some(location) => location,
-            None => bail!("Error: Valid MEGA link not found."),
-        };
-
-        if !resolved.contains("mega.nz") {
-            bail!("Error: Valid MEGA link not found.");
-        }
+        let resolved = resolve_mega_link(vm_name).await?;
 
         let _ = multi.println(format!(
             "{} Resolved Link [{}]: {}",
@@ -139,9 +110,50 @@ impl DownloadManager {
             style(&resolved).cyan()
         ));
 
-        let bar = bar.unwrap_or_else(|| multi.add(indicatif::ProgressBar::new(0)));
-        let output = mega::download_public(&resolved, Path::new("."), bar).await?;
+        let bar = bar.unwrap_or_else(|| multi.add(indicatif::ProgressBar::new_spinner()));
+        let noop = |_: &Path| {};
+        let hooks = mega::DownloadHooks {
+            cancel: &AtomicBool::new(false),
+            on_metadata: &|total, filename| {
+                bar.set_length(total);
+                bar.set_message(format!("Downloading {filename}"));
+            },
+            on_progress: &|bytes| bar.set_position(bytes),
+            on_part: &noop,
+        };
+        let output = mega::download_public(&resolved, Path::new("."), &hooks).await?;
 
         Ok(output)
+    }
+}
+
+/// Resolves the HackMyVM redirect to the public MEGA link. Done manually:
+/// reqwest strips the `#key` fragment from Location URLs while following
+/// redirects, but the MEGA key lives exactly in that fragment. No session
+/// required — the endpoint is public.
+pub async fn resolve_mega_link(vm_name: &str) -> Result<String> {
+    let resolve_url = format!(
+        "https://downloads.hackmyvm.eu/{}.zip",
+        vm_name.to_lowercase()
+    );
+    let resolver = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("Failed to build HTTP client")?;
+    let response = resolver
+        .get(&resolve_url)
+        .send()
+        .await
+        .context("Connection error")?;
+    let resolved = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    match resolved {
+        Some(link) if link.contains("mega.nz") => Ok(link),
+        _ => bail!("Error: Valid MEGA link not found."),
     }
 }

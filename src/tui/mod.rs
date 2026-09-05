@@ -4,9 +4,26 @@
 
 pub mod render;
 
+pub mod downloads;
+
+
 use std::time::Duration;
 
 use anyhow::Result;
+use std::path::PathBuf;
+
+/// Temporary file logger for live debugging (kept tiny; no-op on write errors).
+#[allow(dead_code)] // kept for future live debugging
+pub fn debug_log(message: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/opencode/hmv_debug.log")
+    {
+        let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), message);
+    }
+}
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::modules::flag::FlagVerdict;
@@ -19,6 +36,7 @@ use crate::modules::stats::{ProfileStats, ProfileWriteup};
 pub enum PopupKind {
     Flag,
     Upload,
+    Download,
 }
 
 /// A text-input popup bound to one machine. The Flag popup carries two
@@ -164,9 +182,22 @@ pub enum InputMode {
     Filter,
 }
 
+/// Overlay listing background download jobs (`o` toggles it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Normal,
+    Downloads,
+}
+
 pub struct AppState {
     pub tab: Tab,
     pub input_mode: InputMode,
+    /// Downloads overlay visibility (`o`).
+    pub view: ViewMode,
+    /// Background download jobs (newest last). Shared with the renderer.
+    pub download_jobs: Vec<std::sync::Arc<downloads::DownloadJob>>,
+    /// First `q` with active downloads only sets this; second quits.
+    pub quit_warned: bool,
     pub filter: String,
     pub selected: usize,
     /// First visible row for the active list (manual scrolling window).
@@ -183,6 +214,8 @@ pub struct AppState {
     pub popup: Option<Popup>,
     /// Action queued by a popup, executed by the host application.
     pub pending_action: Option<TuiAction>,
+    /// Downloads beyond the parallel cap, started FIFO when a slot frees.
+    pub download_queue: std::collections::VecDeque<(String, PathBuf)>,
     /// Action result popup (persists until dismissed).
     pub report: Option<ActionReport>,
     /// Refresh queued for when the report popup closes (Opsi A).
@@ -200,6 +233,9 @@ impl AppState {
         Self {
             tab: Tab::Stats,
             input_mode: InputMode::Normal,
+            view: ViewMode::Normal,
+            download_jobs: Vec::new(),
+            quit_warned: false,
             filter: String::new(),
             selected: 0,
             scroll: 0,
@@ -210,6 +246,7 @@ impl AppState {
             status_expiry: None,
             popup: None,
             pending_action: None,
+            download_queue: std::collections::VecDeque::new(),
             report: None,
             pending_refresh_after_close: false,
             data,
@@ -222,6 +259,57 @@ impl AppState {
         let mut state = Self::new(TuiData::empty());
         state.fetching = Some("Loading data...".to_string());
         state
+    }
+
+    /// Number of background downloads still running.
+    pub fn active_downloads(&self) -> usize {
+        self.download_jobs.iter().filter(|job| job.is_active()).count()
+    }
+
+    /// Toggles the downloads overlay; harmless while popups are open.
+    pub fn toggle_downloads_view(&mut self) {
+        if self.popup.is_none() && self.report.is_none() {
+            self.view = match self.view {
+                ViewMode::Normal => ViewMode::Downloads,
+                ViewMode::Downloads => ViewMode::Normal,
+            };
+        }
+    }
+
+    /// Index of the newest active download (cancel target in the overlay).
+    pub fn download_selected(&self) -> usize {
+        self.download_jobs
+            .iter()
+            .rposition(|job| job.is_active())
+            .unwrap_or(self.download_jobs.len().saturating_sub(1))
+    }
+
+    /// First `q` with active downloads warns instead of quitting.
+    pub fn request_quit(&mut self) {
+        let active = self.active_downloads();
+        if active > 0 && !self.quit_warned {
+            self.quit_warned = true;
+            let jobs: Vec<String> = self
+                .download_jobs
+                .iter()
+                .filter(|job| job.is_active())
+                .map(|job| {
+                    let state = job.state.lock().unwrap();
+                    let pct = if state.total > 0 {
+                        format!(" {}%", (state.downloaded * 100 / state.total))
+                    } else {
+                        String::new()
+                    };
+                    format!("↓ {}{pct}", job.vm)
+                })
+                .collect();
+            self.set_status(format!(
+                "{active} download active — press q again to abort: {}",
+                jobs.join(" · ")
+            ));
+            return;
+        }
+        self.quit = true;
     }
 
     /// Shows a status message in the footer, auto-expiring after 5 seconds.
@@ -357,7 +445,7 @@ impl AppState {
             return;
         }
         let allowed = match kind {
-            PopupKind::Flag => self.tab == Tab::Machines,
+            PopupKind::Flag | PopupKind::Download => self.tab == Tab::Machines,
             PopupKind::Upload => self.tab == Tab::Pending,
         };
         if !allowed {
@@ -367,6 +455,9 @@ impl AppState {
                 }
                 PopupKind::Upload => {
                     "Writeup submission is only available on the Pending tab."
+                }
+                PopupKind::Download => {
+                    "Downloads are only available on the Machines tab."
                 }
             });
             return;
@@ -409,6 +500,22 @@ impl AppState {
             return;
         }
 
+        if kind == PopupKind::Download {
+            // Prefill with the persisted choice, else the working directory.
+            let prefill = crate::config::ConfigManager::new()
+                .download_dir()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            self.popup = Some(Popup {
+                kind,
+                vm,
+                buffers: vec![prefill.display().to_string()],
+                field: 0,
+                notice: None,
+                readonly: false,
+            });
+            return;
+        }
+
         self.popup = Some(Popup {
             kind,
             vm,
@@ -444,6 +551,27 @@ impl AppState {
             return;
         }
 
+        if popup.kind == PopupKind::Download {
+            // Enforce the parallel cap here: overflow goes to the queue.
+            let active = self.active_downloads();
+            if active >= downloads::PARALLEL_DOWNLOADS {
+                let vm = popup.vm.clone();
+                self.download_queue
+                    .push_back((popup.vm, PathBuf::from(values[0].1.clone())));
+                self.set_status(format!(
+                    "[↓] {vm} queued — {} downloads active.",
+                    downloads::PARALLEL_DOWNLOADS
+                ));
+                return;
+            }
+            self.pending_action = Some(TuiAction {
+                kind: popup.kind,
+                vm: popup.vm,
+                values,
+            });
+            return;
+        }
+
         let kind_label = match popup.kind {
             PopupKind::Flag => {
                 if values.len() > 1 {
@@ -453,6 +581,7 @@ impl AppState {
                 }
             }
             PopupKind::Upload => "writeup URL",
+            PopupKind::Download => "download",
         };
         self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
         self.pending_action = Some(TuiAction {
@@ -550,10 +679,6 @@ impl AppState {
                 Err(error) => format!("xdg-open failed: {error}"),
             });
         }
-    }
-
-    pub fn request_quit(&mut self) {
-        self.quit = true;
     }
 
     /// Manual refresh: only allowed while idle to keep the state machine
@@ -658,23 +783,53 @@ fn event_loop(
 
         // User actions from popups (flag submission, writeup upload).
         if let Some(action) = app.pending_action.take() {
-            let label = match action.kind {
-                PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
-                PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
-            };
-            app.fetching = Some(label);
-            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-            match run_action(action) {
-                Ok(report) => {
-                    // Footer shows a 5s summary; the popup persists.
-                    app.set_status(report.status.clone());
-                    app.pending_refresh_after_close = report.changed;
-                    app.report = Some(report);
+            if action.kind == PopupKind::Download {
+                // Non-blocking: spawn a background job and move on.
+                let dir = PathBuf::from(action.values[0].1.clone());
+                match downloads::start_download(action.vm.clone(), dir) {
+                    Ok(job) => {
+                        app.set_status(format!("[↓] Download {} started.", action.vm));
+                        app.download_jobs.push(std::sync::Arc::new(job));
+                    }
+                    Err(error) => app.set_status(format!("Download failed: {error:#}")),
                 }
-                Err(error) => app.set_status(format!("Action failed: {error:#}")),
+            } else {
+                let label = match action.kind {
+                    PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
+                    PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
+                    PopupKind::Download => unreachable!("handled above"),
+                };
+                app.fetching = Some(label);
+                terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+                match run_action(action) {
+                    Ok(report) => {
+                        // Footer shows a 5s summary; the popup persists.
+                        app.set_status(report.status.clone());
+                        app.pending_refresh_after_close = report.changed;
+                        app.report = Some(report);
+                    }
+                    Err(error) => app.set_status(format!("Action failed: {error:#}")),
+                }
+                app.fetching = None;
             }
-            app.fetching = None;
+        }
+
+        // Start queued downloads as slots free up. Terminal jobs are kept
+        // for the rest of the session as a small success/failure history.
+        if app.active_downloads() < downloads::PARALLEL_DOWNLOADS {
+            while let Some((vm, dir)) = app.download_queue.pop_front() {
+                match downloads::start_download(vm.clone(), dir) {
+                    Ok(job) => {
+                        app.set_status(format!("[↓] Queued download {} started.", vm));
+                        app.download_jobs.push(std::sync::Arc::new(job));
+                    }
+                    Err(error) => app.set_status(format!("Download failed: {error:#}")),
+                }
+                if app.active_downloads() >= downloads::PARALLEL_DOWNLOADS {
+                    break;
+                }
+            }
         }
 
         if app.should_fetch(*pending_fetch) {
@@ -697,6 +852,13 @@ fn event_loop(
         }
 
         if app.quit {
+            // Abort active tasks and clean their staged `.part` files.
+            for job in &app.download_jobs {
+                if job.is_active() {
+                    job.request_cancel();
+                    job.remove_part();
+                }
+            }
             return Ok(());
         }
     }
@@ -785,6 +947,20 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Char('/') => app.enter_filter_mode(),
             KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
             KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
+            KeyCode::Char('d') => app.open_action_popup(PopupKind::Download),
+            KeyCode::Char('o') => app.toggle_downloads_view(),
+            KeyCode::Char('c') if app.view == ViewMode::Downloads => {
+                // Cancel the most recent active download from the overlay.
+                if let Some(job) = app
+                    .download_jobs
+                    .iter()
+                    .rev()
+                    .find(|job| job.is_active())
+                {
+                    job.request_cancel();
+                    app.set_status(format!("Cancelling {}...", job.vm));
+                }
+            }
             KeyCode::Enter => app.open_selected_link(),
             _ => {}
         },
@@ -1188,6 +1364,79 @@ mod tests {
         assert_eq!(state.visible_releases().len(), 1);
         assert_eq!(state.visible_releases()[0].name, "INVERNADERO_1.0");
         assert!(!state.visible_releases()[0].released);
+    }
+
+    #[test]
+    fn o_key_toggles_downloads_view() {
+        let mut state = app();
+        assert_eq!(state.view, ViewMode::Normal);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.view, ViewMode::Downloads);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.view, ViewMode::Normal);
+    }
+
+    #[test]
+    fn download_popup_flow_and_gate() {
+        let mut state = app();
+        assert_eq!(state.tab, super::Tab::Stats, "tab awal");
+
+        // 'd' is gated to the Machines tab.
+        state.next_tab(); // Writeups
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_none());
+
+        // On Machines it opens with a destination field.
+        state.next_tab(); // Pending
+        state.next_tab(); // Machines
+        assert_eq!(state.tab, super::Tab::Machines, "sebelum d");
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Download);
+        assert!(!popup.buffers[0].is_empty(), "destination prefilled");
+
+        // Typing a path and confirming queues the download action.
+        state.popup.as_mut().unwrap().buffers[0] = "/tmp/vm-lab".to_string();
+        state.confirm_popup();
+        let action = state.pending_action.take().unwrap();
+        assert_eq!(action.kind, PopupKind::Download);
+        assert_eq!(action.values, vec![(0, "/tmp/vm-lab".to_string())]);
+    }
+
+    #[test]
+    fn quit_warns_once_while_downloads_are_active() {
+        let mut state = app();
+        state.download_jobs = vec![std::sync::Arc::new(crate::tui::downloads::DownloadJob {
+            id: 1,
+            vm: "Xslib".into(),
+            dest_dir: "/tmp".into(),
+            state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::tui::downloads::DownloadState::default(),
+            )),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            handle: None,
+        })];
+
+        // First q warns instead of quitting.
+        state.request_quit();
+        assert!(!state.quit);
+        assert!(state.status.as_deref().unwrap().contains("q again to abort"));
+
+        // Second q quits (abort handled by the event loop).
+        state.request_quit();
+        assert!(state.quit);
     }
 
     #[test]

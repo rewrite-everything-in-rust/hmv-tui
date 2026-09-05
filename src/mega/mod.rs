@@ -4,9 +4,8 @@ pub mod crypto;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::AsyncWriteExt;
 
 use crypto::{ChunkedMac, CtrStream, FileKeys};
@@ -20,16 +19,24 @@ struct PublicFile {
     url: String,
 }
 
-/// Downloads and decrypts a public MEGA file, reporting through `progress`.
-/// Pass a `ProgressBar` attached to a `MultiProgress` for batch operations.
-pub async fn download_public(
-    url: &str,
-    destination: &Path,
-    progress: ProgressBar,
-) -> Result<PathBuf> {
-    let info_spinner = crate::ui::spinner("Fetching file metadata...");
+/// Callbacks handed to [`download_public`]. Terminal rendering (CLI) and
+/// in-TUI progress both live behind these hooks — the module never touches
+/// the terminal itself.
+pub struct DownloadHooks<'a> {
+    /// Set to true to abort the transfer; the `.part` file is cleaned up.
+    pub cancel: &'a AtomicBool,
+    /// Called once after metadata: (total bytes, original file name).
+    pub on_metadata: &'a (dyn Fn(u64, &str) + Send + Sync),
+    /// Called on every chunk with the absolute number of bytes written.
+    pub on_progress: &'a (dyn Fn(u64) + Send + Sync),
+    /// Called once when the `.part` staging file is created.
+    pub on_part: &'a (dyn Fn(&Path) + Send + Sync),
+}
+
+/// Downloads and decrypts a public MEGA file, reporting through `hooks`.
+pub async fn download_public(url: &str, destination: &Path, hooks: &DownloadHooks<'_>) -> Result<PathBuf> {
     let (file, keys) = fetch_public_file(url).await?;
-    info_spinner.finish_and_clear();
+    (hooks.on_metadata)(file.size, &file.name);
 
     let filename = sanitize_filename(&file.name);
     let output = destination.join(&filename);
@@ -38,27 +45,17 @@ pub async fn download_public(
     }
 
     let part = destination.join(format!("{filename}.part"));
-    progress.set_length(file.size);
-    progress.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.blue} {msg} {bar:40.cyan/blue} {percent:>3}% • {bytes}/{total_bytes} • {bytes_per_sec} • {eta}",
-        )
-        .expect("static progress template")
-        .progress_chars("█░"),
-    );
-    progress.set_message(format!("Downloading {filename}"));
+    (hooks.on_part)(&part);
 
-    let result = stream_to_file(&file, &keys, &part, &progress).await;
+    let result = stream_to_file(&file, &keys, &part, hooks).await;
     match result {
         Ok(()) => {
-            progress.finish_and_clear();
             tokio::fs::rename(&part, &output)
                 .await
                 .context("Failed to finalize downloaded file")?;
             Ok(output)
         }
         Err(error) => {
-            progress.finish_and_clear();
             let _ = tokio::fs::remove_file(&part).await;
             Err(error)
         }
@@ -128,7 +125,7 @@ async fn stream_to_file(
     info: &PublicFile,
     keys: &FileKeys,
     part: &Path,
-    progress: &ProgressBar,
+    hooks: &DownloadHooks<'_>,
 ) -> Result<()> {
     let response = reqwest::Client::new()
         .get(&info.url)
@@ -147,6 +144,9 @@ async fn stream_to_file(
     let mut written = 0u64;
 
     while let Some(chunk) = stream.next().await {
+        if hooks.cancel.load(Ordering::Relaxed) {
+            bail!("Download cancelled.");
+        }
         pending.extend_from_slice(&chunk.context("Network error during MEGA download")?);
 
         // Only decrypt whole blocks now; the raw tail stays in `pending` until
@@ -161,11 +161,14 @@ async fn stream_to_file(
             }
             file.write_all(blocks).await?;
             written += full as u64;
-            progress.set_position(written);
+            (hooks.on_progress)(written);
             pending.drain(..full);
         }
     }
 
+    if hooks.cancel.load(Ordering::Relaxed) {
+        bail!("Download cancelled.");
+    }
     if !pending.is_empty() {
         let actual_len = pending.len();
         ctr.apply(&mut pending);
@@ -174,7 +177,7 @@ async fn stream_to_file(
         let mut final_block = [0u8; 16];
         final_block[..actual_len].copy_from_slice(&pending);
         mac.update(&final_block);
-        progress.set_position(written);
+        (hooks.on_progress)(written);
     }
 
     if written != info.size {

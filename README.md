@@ -128,6 +128,8 @@ Three tabs driven entirely by the keyboard:
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` | Filter the current list (type to narrow, `Esc` clears) |
 | `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
+| `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified; `c` cancels. |
+| `o` | Toggle the **Downloads** overlay (live gauges, speed, final paths). Closing it never stops running downloads. |
 | `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
 | `Enter` | Open the selected writeup link in your browser |
 | `r` | Re-fetch all data |
@@ -140,6 +142,8 @@ Three tabs driven entirely by the keyboard:
 - **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
 
 Actions submitted from the TUI show their verdicts in a result popup that stays until dismissed (`User flag: ✓ ACCEPTED`, `Root flag: ✗ REJECTED`, ...) and trigger an automatic data refresh on close when your progress changed.
+
+Downloads run in the background (max 2 in parallel, extra ones queue): the Downloads overlay shows live gauges, speed and the final path; downloads keep running when the overlay is closed; `c` cancels and cleans the staged `.part` file; quitting while a download is active asks for a second `q`.
 
 ### VM Interaction
 

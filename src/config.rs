@@ -1,10 +1,11 @@
 //! Secure credential storage: username in ~/.hmv/config.json, password in the
 //! OS credential vault (keyutils / Secret Service on Linux, Credential Manager
-//! on Windows, Keychain on macOS). Ported from hmv/modules/auth.py.
+//! on Windows, Keychain on macOS). Also persists UI preferences such as the
+//! last-used download directory. Ported from hmv/modules/auth.py.
 
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ const CONFIG_FILE_NAME: &str = "config.json";
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download_dir: Option<String>,
 }
 
 pub struct ConfigManager {
@@ -33,6 +36,11 @@ impl ConfigManager {
         }
     }
 
+    fn read_config(&self) -> Option<ConfigFile> {
+        let raw = fs::read_to_string(&self.config_file).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
     fn read_username(&self) -> Result<String> {
         let raw = fs::read_to_string(&self.config_file)
             .with_context(|| "Configuration not found. Run 'hmv config' first.")?;
@@ -46,10 +54,32 @@ impl ConfigManager {
             .map_err(|e| anyhow!("Keyring storage system not found: {e}"))
     }
 
-    /// Persists the username on disk and the password in the OS vault.
+    /// Last download directory the user chose (survives restarts).
+    pub fn download_dir(&self) -> Option<PathBuf> {
+        self.read_config()
+            .and_then(|cfg| cfg.download_dir)
+            .map(PathBuf::from)
+    }
+
+    /// Persists the chosen download directory, preserving other fields.
+    pub fn save_download_dir(&self, dir: &Path) -> Result<()> {
+        let username = self.read_username().unwrap_or_default();
+        let cfg = ConfigFile {
+            username,
+            download_dir: Some(dir.display().to_string()),
+        };
+        fs::write(&self.config_file, serde_json::to_string(&cfg)?)
+            .with_context(|| "Failed to write configuration file")?;
+        Ok(())
+    }
+
+    /// Persists the username on disk and the password in the OS vault,
+    /// preserving the saved download directory.
     pub fn save_credentials(&self, username: &str, password: &str) -> Result<()> {
+        let download_dir = self.read_config().and_then(|cfg| cfg.download_dir);
         let json = serde_json::to_string(&ConfigFile {
             username: username.to_string(),
+            download_dir,
         })?;
         fs::write(&self.config_file, json)
             .with_context(|| "Failed to write configuration file")?;

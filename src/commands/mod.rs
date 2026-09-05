@@ -62,7 +62,11 @@ pub async fn tui_cmd() -> Result<()> {
 /// `changed` telling whether dashboard data must be refreshed after the
 /// popup closes.
 async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<ActionReport> {
+    if action.kind == crate::tui::PopupKind::Download {
+        anyhow::bail!("downloads are spawned directly, not through run_action");
+    }
     match action.kind {
+        crate::tui::PopupKind::Download => unreachable!("handled by the event loop"),
         crate::tui::PopupKind::Flag => {
             use crate::modules::flag::FlagVerdict;
 
