@@ -127,7 +127,7 @@ Three tabs driven entirely by the keyboard:
 | `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending** and **Machines** |
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` | Filter the current list (type to narrow, `Esc` clears) |
-| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel) |
+| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
 | `u` | **Pending only** — submit a writeup URL for the pwned machine |
 | `Enter` | Open the selected writeup link in your browser |
 | `r` | Re-fetch all data |
