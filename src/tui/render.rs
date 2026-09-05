@@ -14,8 +14,26 @@ use super::{
     WriteupsPopup, downloads::Phase,
 };
 
-const ACCENT: Color = Color::Rgb(117, 206, 122);
-const WARN: Color = Color::Rgb(255, 212, 130);
+// Nord theme palette (https://www.nordtheme.com/docs/colors-and-palettes).
+const NORD1: Color = Color::Rgb(0x3B, 0x42, 0x52); // polar night (dim bg)
+const NORD6: Color = Color::Rgb(0xEC, 0xEF, 0xF4); // snow storm (bright text)
+const NORD7: Color = Color::Rgb(0x8F, 0xBC, 0xBB); // frost (teal)
+const NORD8: Color = Color::Rgb(0x88, 0xC0, 0xD0); // frost (accent blue)
+const NORD10: Color = Color::Rgb(0x5E, 0x81, 0xAC); // frost (links)
+const NORD11: Color = Color::Rgb(0xBF, 0x61, 0x6A); // aurora red
+const NORD13: Color = Color::Rgb(0xEB, 0xCB, 0x8B); // aurora yellow
+const NORD14: Color = Color::Rgb(0xA3, 0xBE, 0x8C); // aurora green
+const NORD15: Color = Color::Rgb(0xB4, 0x8E, 0xAD); // aurora purple
+
+const ACCENT: Color = NORD8; // titles, active tab, gauges, borders
+const WARN: Color = NORD13; // notices, pending count, non-final states
+const OK: Color = NORD14; // success, PWNED, beginner difficulty
+const BAD: Color = NORD11; // failures, advanced difficulty
+const FROST: Color = NORD7; // was cyan: windows OS, READ format
+const PURPLE: Color = NORD15; // was magenta: WATCH format, UPCOMING
+const BRIGHT: Color = NORD6; // was white: names, primary text
+const LINK: Color = NORD10; // writeup URLs
+const HL_BG: Color = NORD1; // selected-row background
 
 pub fn draw(frame: &mut Frame, app: &mut AppState) {
     let [header, tabs, body, footer] = Layout::vertical([
@@ -59,12 +77,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
     let stats = &app.data.stats;
     let pending_count = app.data.pending.len();
     let line = Line::from(vec![
-        Span::styled(" HMV-CLI", Style::new().fg(ACCENT).bold()),
+        Span::styled(" HackMyVM", Style::new().fg(ACCENT).bold()),
         Span::styled(" dashboard", Style::new().dim()),
         Span::raw("  ·  "),
         Span::styled(
             format!("{} ", stats.username),
-            Style::new().fg(Color::White).bold(),
+            Style::new().fg(BRIGHT).bold(),
         ),
         Span::styled(
             stats.rank.clone().unwrap_or_default(),
@@ -75,12 +93,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::raw("  ·  "),
         Span::styled(
             format!("{} writeups", stats.accepted_writeups.len()),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(FROST),
         ),
         Span::raw("  ·  "),
         Span::styled(
             format!("{pending_count} pending"),
-            Style::new().fg(if pending_count > 0 { WARN } else { Color::Green }),
+            Style::new().fg(if pending_count > 0 { WARN } else { OK }),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -156,7 +174,7 @@ fn draw_stats(frame: &mut Frame, area: Rect, app: &AppState) {
         let gauge = LineGauge::default()
             .label(Span::styled(
                 format!("{label} {value}/{total} ({percent}%)"),
-                Style::new().fg(Color::White),
+                Style::new().fg(BRIGHT),
             ))
             .ratio(ratio.clamp(0.0, 1.0))
             .filled_style(Style::new().fg(ACCENT));
@@ -197,7 +215,7 @@ fn draw_writeups(frame: &mut Frame, area: Rect, app: &mut AppState) {
     .header(header)
     .row_highlight_style(
         Style::new()
-            .bg(Color::DarkGray)
+            .bg(HL_BG)
             .add_modifier(Modifier::BOLD),
     )
     .block(filter_block(app));
@@ -217,7 +235,7 @@ fn draw_pending(frame: &mut Frame, area: Rect, app: &mut AppState) {
             let name = (*vm).clone();
             ListItem::new(Line::from(vec![
                 Span::styled(" ● ", Style::new().fg(WARN)),
-                Span::styled(name, Style::new().fg(Color::White).bold()),
+                Span::styled(name, Style::new().fg(BRIGHT).bold()),
                 Span::styled("  — pwned, writeup not submitted", Style::new().dim()),
             ]))
         })
@@ -226,7 +244,7 @@ fn draw_pending(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let list = List::new(items)
         .highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(HL_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .block(filter_block(app));
@@ -307,19 +325,19 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
         .map(|m| {
             let diff = m.difficulty.to_uppercase();
             let diff_span = match diff.as_str() {
-                "BEGINNER" => Span::styled(diff, Style::new().fg(Color::Green)),
+                "BEGINNER" => Span::styled(diff, Style::new().fg(OK)),
                 "INTERMEDIATE" => Span::styled(diff, Style::new().fg(WARN)),
-                "ADVANCED" => Span::styled(diff, Style::new().fg(Color::Red)),
+                "ADVANCED" => Span::styled(diff, Style::new().fg(BAD)),
                 _ => Span::raw(diff),
             };
             let status = m.status.to_uppercase();
             let status_span = if status.contains("DONE") || status.contains("PWNED") {
-                Span::styled(status, Style::new().fg(Color::Green).bold())
+                Span::styled(status, Style::new().fg(OK).bold())
             } else {
                 Span::styled(status, Style::new().fg(WARN))
             };
             Row::new([
-                Span::styled(m.name.clone(), Style::new().fg(Color::White)),
+                Span::styled(m.name.clone(), Style::new().fg(BRIGHT)),
                 diff_span,
                 Span::raw(m.creator.clone()),
                 Span::raw(m.size.clone()),
@@ -341,7 +359,7 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
     .header(header)
     .row_highlight_style(
         Style::new()
-            .bg(Color::DarkGray)
+            .bg(HL_BG)
             .add_modifier(Modifier::BOLD),
     )
     .block(filter_block(app));
@@ -361,7 +379,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let lines = vec![
             Line::from(Span::styled(
                 format!("Logged in as {username}"),
-                Style::new().fg(Color::Green).bold(),
+                Style::new().fg(OK).bold(),
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -372,9 +390,9 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let block = Block::bordered()
             .title(Span::styled(
                 format!(" Account — {username} "),
-                Style::new().fg(Color::Green).bold(),
+                Style::new().fg(OK).bold(),
             ))
-            .border_style(Style::new().fg(Color::Green));
+            .border_style(Style::new().fg(OK));
         frame.render_widget(Paragraph::new(lines).block(block), box_area);
         return;
     }
@@ -386,7 +404,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let lines = vec![
             Line::from(Span::styled(
                 "User & root flags are in.",
-                Style::new().fg(Color::Green),
+                Style::new().fg(OK),
             )),
             Line::from(Span::styled(
                 "Resubmission is disabled.",
@@ -398,9 +416,9 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let block = Block::bordered()
             .title(Span::styled(
                 format!(" ✓ Already PWNED — {} ", popup.vm),
-                Style::new().fg(Color::Green).bold(),
+                Style::new().fg(OK).bold(),
             ))
-            .border_style(Style::new().fg(Color::Green));
+            .border_style(Style::new().fg(OK));
         frame.render_widget(Paragraph::new(lines).block(block), box_area);
         return;
     }
@@ -454,7 +472,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
             raw.to_string()
         };
         let style = if active {
-            Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::new().fg(BRIGHT).add_modifier(Modifier::BOLD)
         } else {
             Style::new().dim()
         };
@@ -485,19 +503,19 @@ fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
         .iter()
         .map(|r| {
             let os_span = if r.os == "windows" {
-                Span::styled(r.os.clone(), Style::new().fg(Color::Cyan))
+                Span::styled(r.os.clone(), Style::new().fg(FROST))
             } else {
                 Span::styled(r.os.clone(), Style::new().fg(WARN))
             };
             let status_span = if r.released {
-                Span::styled("RELEASED", Style::new().fg(Color::Green).bold())
+                Span::styled("RELEASED", Style::new().fg(OK).bold())
             } else {
-                Span::styled("UPCOMING", Style::new().fg(Color::Magenta).bold())
+                Span::styled("UPCOMING", Style::new().fg(PURPLE).bold())
             };
             Row::new([
                 Span::styled(r.date.clone(), Style::new().dim()),
                 os_span,
-                Span::styled(r.name.clone(), Style::new().fg(Color::White).bold()),
+                Span::styled(r.name.clone(), Style::new().fg(BRIGHT).bold()),
                 status_span,
             ])
         })
@@ -515,7 +533,7 @@ fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
     .header(header)
     .row_highlight_style(
         Style::new()
-            .bg(Color::DarkGray)
+            .bg(HL_BG)
             .add_modifier(Modifier::BOLD),
     )
     .block(filter_block(app));
@@ -540,8 +558,8 @@ fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
     let mut lines = vec![Line::from("")];
     for (kind, text) in &report.entries {
         let span = match kind {
-            ReportKind::Success => Span::styled(text.clone(), Style::new().fg(Color::Green).bold()),
-            ReportKind::Failure => Span::styled(text.clone(), Style::new().fg(Color::Red).bold()),
+            ReportKind::Success => Span::styled(text.clone(), Style::new().fg(OK).bold()),
+            ReportKind::Failure => Span::styled(text.clone(), Style::new().fg(BAD).bold()),
             ReportKind::Info => Span::styled(text.clone(), Style::new().fg(WARN)),
         };
         lines.push(Line::from(format!("  {span}")));
@@ -570,21 +588,21 @@ fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
         .iter()
         .map(|w| {
             let lang_style = if w.language.contains("English") {
-                Style::new().fg(Color::Green)
+                Style::new().fg(OK)
             } else {
                 Style::new().fg(WARN)
             };
             let format_style = if w.format.contains("Read") {
-                Style::new().fg(Color::Cyan)
+                Style::new().fg(FROST)
             } else {
-                Style::new().fg(Color::Magenta)
+                Style::new().fg(PURPLE)
             };
             Row::new(vec![
                 Span::styled(w.date.clone(), Style::new().dim()),
-                Span::styled(w.author.clone(), Style::new().fg(Color::White).bold()),
+                Span::styled(w.author.clone(), Style::new().fg(BRIGHT).bold()),
                 Span::styled(w.language.clone(), lang_style),
                 Span::styled(w.format.to_uppercase(), format_style),
-                Span::styled(w.url.clone(), Style::new().fg(Color::Blue).dim()),
+                Span::styled(w.url.clone(), Style::new().fg(LINK).dim()),
             ])
         })
         .collect();
@@ -614,7 +632,7 @@ fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
     .footer(hint)
     .row_highlight_style(
         Style::new()
-            .bg(Color::DarkGray)
+            .bg(HL_BG)
             .add_modifier(Modifier::BOLD),
     )
     .block(
@@ -703,24 +721,24 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
                             super::downloads::fmt_bytes(state.total),
                             super::downloads::fmt_bytes(state.speed_bps),
                         ),
-                        Style::new().fg(Color::White),
+                        Style::new().fg(BRIGHT),
                     ),
                 ])
             }
             Phase::Done => Line::from(vec![
                 Span::raw("  "),
-                Span::styled("✓ ", Style::new().fg(Color::Green).bold()),
+                Span::styled("✓ ", Style::new().fg(OK).bold()),
                 Span::styled(
                     format!("{} → {}", job.vm, state.message),
-                    Style::new().fg(Color::Green),
+                    Style::new().fg(OK),
                 ),
             ]),
             Phase::Failed => Line::from(vec![
                 Span::raw("  "),
-                Span::styled("✗ ", Style::new().fg(Color::Red).bold()),
+                Span::styled("✗ ", Style::new().fg(BAD).bold()),
                 Span::styled(
                     format!("{}: {}", job.vm, state.message),
-                    Style::new().fg(Color::Red),
+                    Style::new().fg(BAD),
                 ),
             ]),
             Phase::Cancelled => Line::from(vec![
