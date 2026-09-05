@@ -270,12 +270,19 @@ impl AppState {
         self.quit = true;
     }
 
-    /// Manual refresh: only allowed while idle to keep the state machine sane.
+    /// Manual refresh: only allowed while idle to keep the state machine
+    /// sane. The event loop owns the `fetching` label; this only queues the
+    /// request — setting the label here too would make the loop's trigger
+    /// condition (`fetching.is_none()`) never fire.
     pub fn request_refresh(&mut self) {
         if self.fetching.is_none() {
-            self.fetching = Some("Refreshing data...");
             self.refresh_requested = true;
         }
+    }
+
+    /// Whether the event loop should run a (re)fetch right now.
+    pub fn should_fetch(&self, pending_fetch: bool) -> bool {
+        pending_fetch || self.refresh_requested
     }
 }
 
@@ -308,9 +315,10 @@ fn event_loop(
 
         app.tick();
 
-        if *pending_fetch || (app.refresh_requested && app.fetching.is_none()) {
+        if app.should_fetch(*pending_fetch) {
             *pending_fetch = false;
             app.refresh_requested = false;
+            app.fetching = Some("Refreshing data...");
             // Draw immediately so the `⟳ <label>` shows while the blocking
             // fetch runs, instead of freezing silently.
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
@@ -468,18 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn request_refresh_flags_fetching() {
+    fn request_refresh_queues_request_only() {
         let mut state = app();
         assert!(state.fetching.is_none());
         state.request_refresh();
+        // The label is owned by the event loop; the request alone triggers it.
         assert!(state.refresh_requested);
-        assert_eq!(state.fetching, Some("Refreshing data..."));
+        assert!(state.fetching.is_none());
+        assert!(state.should_fetch(false));
 
-        // While a fetch is running, further requests are ignored.
+        // While a fetch is running (label set), further requests are ignored.
         state.refresh_requested = false;
+        state.fetching = Some("Refreshing data...");
         state.request_refresh();
         assert!(!state.refresh_requested);
-        assert_eq!(state.fetching, Some("Refreshing data..."));
+        assert!(!state.should_fetch(false));
     }
 
     #[test]
