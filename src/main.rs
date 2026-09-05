@@ -20,7 +20,7 @@ async fn main() {
         }
         Some(command) => {
             eprintln!(
-                "[!] Unknown command '{command}'. HMV-CLI is dashboard-only since v1.0.0 — run 'hmv' to open the dashboard."
+                "[!] Unknown command '{command}'. HMV-TUI is dashboard-only since v1.0.0 — run 'hmv' to open the dashboard."
             );
             std::process::exit(1);
         }
@@ -34,7 +34,7 @@ async fn main() {
 
 fn print_help() {
     println!(
-        "HMV-CLI v{} — HackMyVM Advanced Versatile Operations CLI Toolkit",
+        "HMV-TUI v{} — HackMyVM Advanced Versatile Operations Toolkit",
         env!("CARGO_PKG_VERSION")
     );
     println!();

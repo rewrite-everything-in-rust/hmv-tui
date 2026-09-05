@@ -2,7 +2,7 @@
 name = "hmv"
 version = "1.0.0"
 edition = "2021"
-description = "HMV-CLI: HackMyVM Advanced Versatile Operations CLI Toolkit — an interactive terminal dashboard for machine management"
+description = "HMV-TUI: HackMyVM Advanced Versatile Operations Toolkit — an interactive terminal dashboard for machine management"
 license = "MIT"
 authors = ["Ouba"]
 

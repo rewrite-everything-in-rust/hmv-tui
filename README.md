@@ -1,31 +1,45 @@
-# HMV-CLI (Rust)
+# HMV-TUI
 
-### HackMyVM Advanced Versatile Operations CLI Toolkit
+### HackMyVM Advanced Versatile Operations Toolkit
 
-**HMV-CLI** is a modern toolkit for the HackMyVM community: search for machines, download VMs, submit flags, and view community writeups — all from an interactive terminal dashboard.
+<p align="center">
+  <img src="assets/dashboard-stats.png" alt="HackMyVM dashboard — Stats tab with Nord theme" width="100%">
+</p>
 
-Since **v1.0.0**, HMV-CLI is **dashboard-only**: running `hmv` opens the interactive TUI, and all account management (first-time setup, switching accounts, logout) happens inside it. The classic CLI subcommands (`hmv stats`, `hmv machine ...`, `hmv config`) were removed — everything lives in the dashboard now.
+**HMV-TUI** is an interactive terminal dashboard for the [HackMyVM](https://hackmyvm.eu) community: browse the machine catalog, download VMs straight from MEGA, submit flags, read community writeups and publish your own — all without leaving the terminal.
 
-This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com/setyanoegraha/hackmyvm-commandlineinterface) — a single static binary, no Python runtime required.
+One command, one screen: running `hmv` opens the dashboard. Written in pure **Rust**, shipped as a single static binary with no runtime dependencies.
+
+> **v1.0.0** — HMV-TUI is now dashboard-only. The classic CLI subcommands were removed; everything lives in the dashboard, including account management (first-time setup, switching accounts, logout).
 
 ---
 
-## Key Features
+## Screenshots
 
-* **One command**: bare `hmv` opens the dashboard — your stats, accepted writeups, pending writeups, the full machine catalog and downloads in one screen.
-* **In-app account management**: first-run setup, account switching and logout via popups (`a`) — no extra commands to remember.
-* **Secure Auth**: credentials are stored using the system vault (Secret Service on Linux, Credential Manager on Windows, Keychain on macOS) via the `keyring` library. Only the username and your last download folder touch `~/.hmv/config.json`.
-* **Personal Statistics**: rank, title, country, points, roots/users, challenges, writeups, trophies and animated progress gauges per difficulty.
-* **Machine Management**: the complete catalog with color-coded difficulty, instant `/` filtering (name, difficulty, creator, status) and global "Pwned" status synchronization.
-* **High-Speed Downloader**: downloads VMs directly from MEGA — up to **2 in parallel** (extra ones queue). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
-* **Flag Submission**: dual user/root flag popup (`f`), both fields sent in parallel, status-aware (PWNED machines show a read-only box, DONE machines a "one remains" notice).
-* **Writeups Access**: read community writeups (`w`) and submit your own (`u`) without leaving the dashboard.
+| Stats | Machines |
+| :---: | :---: |
+| ![Stats tab](assets/dashboard-stats.png) | ![Machines tab](assets/dashboard-machines.png) |
+
+Nord-themed interface, color-coded difficulties, live progress gauges and an account menu (`a`) for login, switching and logout.
+
+---
+
+## Features
+
+* **One command** — `hmv` opens the dashboard: your stats, accepted writeups, pending writeups, the full machine catalog and downloads in one screen.
+* **In-app account management** — first-run setup, account switching and logout via the account popup (`a`); credentials are validated with a real login before anything is stored.
+* **Secure Auth** — the password lives in your OS vault (Secret Service on Linux, Credential Manager on Windows, Keychain on macOS) via `keyring`. Only the username and the last download folder touch `~/.hmv/config.json`.
+* **Machine catalog** — 370+ machines with color-coded difficulty, instant `/` filtering (name, difficulty, creator, status) and size sorting (`s`: smallest ↔ largest).
+* **High-speed downloader** — VMs stream directly from MEGA, up to **2 in parallel** (extras queue), decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before leaving the `.part` staging file.
+* **Flag submission** — dual user/root popup (`f`), both fields sent in parallel; status-aware (PWNED machines get a read-only box, DONE machines a "one remains" notice).
+* **Writeups** — read community writeups (`w`) and submit your own (`u`) once both flags are in.
+* **Release schedule** — upcoming HackMyVM machines with RELEASED / UPCOMING status.
 
 ---
 
 ## Prerequisites
 
-* **OS**: Linux (primary target; Windows/macOS builds should work but are untested).
+* **OS**: Linux (primary target), macOS and Windows builds are provided as release binaries.
 * An active account on [HackMyVM](https://hackmyvm.eu/).
 * A Secret Service provider on Linux (e.g. GNOME Keyring / KWallet) for credential storage.
 
@@ -33,18 +47,34 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
 
 ## Installation
 
-### 1. From source (Recommended)
+### 1. From a release binary (easiest)
+
+Grab the archive for your platform from the [Releases](https://github.com/setyanoegraha/hmv-tui/releases) page, extract it, and put the `hmv` binary on your `PATH`:
+
+| Platform | Archive |
+| :--- | :--- |
+| Linux x86_64 | `hmv-v1.0.0-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `hmv-v1.0.0-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `hmv-v1.0.0-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `hmv-v1.0.0-x86_64-pc-windows-msvc.zip` |
 
 ```bash
-git clone https://github.com/setyanoegraha/hmv-cli-rust.git
-cd hmv-cli-rust
+tar xzf hmv-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 755 hmv ~/.local/bin/hmv
+```
+
+### 2. From source
+
+```bash
+git clone https://github.com/setyanoegraha/hmv-tui.git
+cd hmv-tui
 cargo install --path .
 ```
 
-### 2. From git directly
+### 3. From git directly
 
 ```bash
-cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git
+cargo install --git https://github.com/setyanoegraha/hmv-tui.git
 ```
 
 > Requires the Rust toolchain (1.85+): https://rustup.rs
@@ -59,7 +89,7 @@ Nothing to configure by hand — just run:
 hmv
 ```
 
-On the very first run the dashboard opens a **Configure HackMyVM** popup:
+On the very first run (or when the stored password no longer works) the dashboard opens a **Configure HackMyVM** popup:
 
 1. Type your HackMyVM **username**, then press `Tab` / `↓`.
 2. Type your **password** (hidden as `•••`), then press `Enter`.
@@ -70,21 +100,16 @@ Credentials are validated with a real login **before** anything is saved. If the
 
 ## Usage Guide
 
-```bash
-hmv
-```
-
-That's the whole command surface. `hmv --version` and `hmv --help` exist for completeness; any other argument is rejected with a hint back to the dashboard.
-
-Five keyboard-driven tabs:
+Five keyboard-driven tabs — `Stats`, `Writeups`, `Pending`, `Machines` and `Releases`:
 
 | Keys | Action |
 | :--- | :--- |
-| `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending**, **Machines** and **Releases** |
+| `Tab` / `←` `→` | Switch between tabs |
 | `↑` `↓` / `j` `k` | Move selection |
 | `g` / `Home` | Jump to the top of the list |
 | `/` | Filter the current list (type to narrow, `Enter` keeps it, `Esc` clears & exits) |
 | `a` | **Account popup** — shows the active account: `Enter` opens the login popup to switch accounts, `l` logs out, `Esc` closes |
+| `s` | **Machines only** — cycle size sort: site order → smallest first → largest first |
 | `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
 | `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified before the file lands. |
 | `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
@@ -94,12 +119,6 @@ Five keyboard-driven tabs:
 | `Enter` | Open the selected writeup link in your browser (**Writeups tab** and writeups popup). |
 | `r` | Re-fetch all data |
 | `q` / `Esc` / `Ctrl-C` | Quit (with active downloads, the first `q` lists them — press `q` again to abort). |
-
-- **Stats** — identity, achievements, trophies and animated progress gauges per difficulty.
-- **Writeups** — every writeup accepted on HackMyVM (VM, language, link).
-- **Pending** — machines you fully pwned (user + root flags) that still have no accepted writeup.
-- **Machines** — the complete catalog (VM, difficulty, creator, size, status) with color-coded difficulty.
-- **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
 
 ### Account Management
 
@@ -123,8 +142,10 @@ Downloads run in the background (max 2 in parallel, extra ones queue): the Downl
 ## Updating
 
 ```bash
-cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git --force
+cargo install --git https://github.com/setyanoegraha/hmv-tui.git --force
 ```
+
+or simply download the latest release binary from the [Releases](https://github.com/setyanoegraha/hmv-tui/releases) page.
 
 ### Uninstallation & Cleanup
 
