@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
+use crate::modules::flag::FlagVerdict;
 use crate::modules::machines::Machine;
+use crate::modules::releases::Release;
 use crate::modules::stats::{ProfileStats, ProfileWriteup};
 
 /// What a popup asks the user for.
@@ -61,13 +63,14 @@ impl Popup {
 }
 
 /// A user action queued from a popup, executed by the host application.
-/// `values` holds one flag (single) or two (user & root, submitted in
-/// parallel); uploads always carry exactly one URL.
+/// `values` carries `(original field index, value)` so verdicts can be
+/// labeled with the field they came from (User flag / Root flag); uploads
+/// always carry exactly one URL.
 #[derive(Debug, Clone)]
 pub struct TuiAction {
     pub kind: PopupKind,
     pub vm: String,
-    pub values: Vec<String>,
+    pub values: Vec<(usize, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +82,8 @@ pub struct TuiData {
     pub pending: Vec<String>,
     /// Full machine catalog for the Machines tab.
     pub catalog: Vec<Machine>,
+    /// Upcoming machine release schedule (Releases tab).
+    pub releases: Vec<Release>,
 }
 
 impl TuiData {
@@ -89,8 +94,28 @@ impl TuiData {
             progress: Vec::new(),
             pending: Vec::new(),
             catalog: Vec::new(),
+            releases: Vec::new(),
         }
     }
+}
+
+/// One line of an action result popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportKind {
+    Success,
+    Failure,
+    Info,
+}
+
+/// Shown after a flag/writeup action; persists until dismissed. If `changed`
+/// is true, a data refresh is queued for when the user closes it (Opsi A).
+#[derive(Debug, Clone)]
+pub struct ActionReport {
+    pub title: String,
+    pub entries: Vec<(ReportKind, String)>,
+    pub changed: bool,
+    /// Short footer summary (5s expiry), separate from the popup.
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,10 +124,17 @@ pub enum Tab {
     Writeups,
     Pending,
     Machines,
+    Releases,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Stats, Tab::Writeups, Tab::Pending, Tab::Machines];
+    pub const ALL: [Tab; 5] = [
+        Tab::Stats,
+        Tab::Writeups,
+        Tab::Pending,
+        Tab::Machines,
+        Tab::Releases,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -110,6 +142,7 @@ impl Tab {
             Tab::Writeups => "Writeups",
             Tab::Pending => "Pending",
             Tab::Machines => "Machines",
+            Tab::Releases => "Releases",
         }
     }
 
@@ -150,6 +183,10 @@ pub struct AppState {
     pub popup: Option<Popup>,
     /// Action queued by a popup, executed by the host application.
     pub pending_action: Option<TuiAction>,
+    /// Action result popup (persists until dismissed).
+    pub report: Option<ActionReport>,
+    /// Refresh queued for when the report popup closes (Opsi A).
+    pub pending_refresh_after_close: bool,
     pub data: TuiData,
     /// Row budget reported by the renderer after layout.
     pub last_visible_rows: Option<usize>,
@@ -173,6 +210,8 @@ impl AppState {
             status_expiry: None,
             popup: None,
             pending_action: None,
+            report: None,
+            pending_refresh_after_close: false,
             data,
             last_visible_rows: None,
         }
@@ -263,6 +302,27 @@ impl AppState {
                     || m.status.to_lowercase().contains(&needle)
             })
             .collect()
+    }
+
+    /// Filtered release schedule for the Releases tab (date, name, os).
+    pub fn visible_releases(&self) -> Vec<&Release> {
+        let needle = self.filter.to_lowercase();
+        self.data
+            .releases
+            .iter()
+            .filter(|r| {
+                needle.is_empty()
+                    || r.name.to_lowercase().contains(&needle)
+                    || r.date.to_lowercase().contains(&needle)
+                    || r.os.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    /// Dismisses the result popup; returns true if a refresh was queued.
+    pub fn close_report(&mut self) -> bool {
+        self.report = None;
+        std::mem::take(&mut self.pending_refresh_after_close)
     }
 
     /// Name of the machine under the selection on machine-centric tabs.
@@ -371,11 +431,12 @@ impl AppState {
             self.set_status(format!("{} is already PWNED — nothing to submit.", popup.vm));
             return;
         }
-        let values: Vec<String> = popup
+        let values: Vec<(usize, String)> = popup
             .buffers
             .iter()
-            .map(|b| b.trim().to_string())
-            .filter(|v| !v.is_empty())
+            .enumerate()
+            .map(|(index, b)| (index, b.trim().to_string()))
+            .filter(|(_, v)| !v.is_empty())
             .collect();
 
         if values.is_empty() {
@@ -407,6 +468,7 @@ impl AppState {
             Tab::Writeups => self.visible_writeups().len(),
             Tab::Pending => self.visible_pending().len(),
             Tab::Machines => self.visible_machines().len(),
+            Tab::Releases => self.visible_releases().len(),
         }
     }
 
@@ -510,13 +572,61 @@ impl AppState {
     }
 }
 
+/// Builds the result popup for a flag submission. Verdicts are labeled with
+/// the field they were typed into (User flag / Root flag) — the API does not
+/// expose the flag level. A lone accepted flag keeps the celebratory footer.
+pub fn build_flag_report(vm: &str, results: Vec<(usize, FlagVerdict)>) -> ActionReport {
+    let mut entries = Vec::new();
+    let mut compact = Vec::new();
+    let mut changed = false;
+
+    for (field, verdict) in results {
+        let label = if field == 0 { "User flag" } else { "Root flag" };
+        let short = if field == 0 { "User" } else { "Root" };
+        match verdict {
+            FlagVerdict::Correct => {
+                entries.push((ReportKind::Success, format!("{label}: ✓ ACCEPTED")));
+                compact.push(format!("{short} ✓"));
+                changed = true;
+            }
+            FlagVerdict::Wrong => {
+                entries.push((ReportKind::Failure, format!("{label}: ✗ REJECTED")));
+                compact.push(format!("{short} ✗"));
+            }
+            FlagVerdict::MachineNotFound => {
+                entries.push((ReportKind::Failure, format!("Machine '{vm}' not found")));
+                compact.push("machine not found".to_string());
+            }
+            FlagVerdict::Unknown(body) => {
+                let body: String = body.chars().take(60).collect();
+                entries.push((ReportKind::Info, format!("Unknown response: {body}")));
+                compact.push("unknown".to_string());
+            }
+        }
+    }
+
+    let status = if entries.len() == 1 && changed {
+        format!("[✓] You hacked {vm}!")
+    } else {
+        let marker = if changed { "+" } else { "!" };
+        format!("[{marker}] {}", compact.join(" · "))
+    };
+
+    ActionReport {
+        title: format!(" Flag results — {vm} "),
+        entries,
+        changed,
+        status,
+    }
+}
+
 /// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on
-/// demand; `run_action` executes a user action (flag/upload) and returns
-/// `(footer message, data changed)`.
+/// demand; `run_action` executes a user action (flag/upload) and returns an
+/// `ActionReport` for the result popup.
 pub fn run(
     mut app: AppState,
     refetch: impl Fn() -> Result<TuiData>,
-    run_action: impl Fn(TuiAction) -> Result<(String, bool)>,
+    run_action: impl Fn(TuiAction) -> Result<ActionReport>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     // Kick off the first load (and any pending request) before looping.
@@ -530,7 +640,7 @@ fn event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
     refetch: &dyn Fn() -> Result<TuiData>,
-    run_action: &dyn Fn(TuiAction) -> Result<(String, bool)>,
+    run_action: &dyn Fn(TuiAction) -> Result<ActionReport>,
     pending_fetch: &mut bool,
 ) -> Result<()> {
     loop {
@@ -556,12 +666,11 @@ fn event_loop(
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
             match run_action(action) {
-                Ok((message, changed)) => {
-                    app.set_status(message);
-                    if changed {
-                        // Pwned status / accepted writeups may have changed.
-                        app.refresh_requested = true;
-                    }
+                Ok(report) => {
+                    // Footer shows a 5s summary; the popup persists.
+                    app.set_status(report.status.clone());
+                    app.pending_refresh_after_close = report.changed;
+                    app.report = Some(report);
                 }
                 Err(error) => app.set_status(format!("Action failed: {error:#}")),
             }
@@ -596,6 +705,20 @@ fn event_loop(
 fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.request_quit();
+        return;
+    }
+
+    // Result report popup captures everything until dismissed. Closing it
+    // with `changed` set queues the deferred refresh (Opsi A).
+    if app.report.is_some() {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                if app.close_report() {
+                    app.refresh_requested = true;
+                }
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -674,6 +797,7 @@ mod tests {
     use crossterm::event::KeyEvent;
 
     fn sample_data() -> TuiData {
+        use crate::modules::releases::Release;
         use crate::modules::stats::ProfileWriteup;
         TuiData {
             stats: ProfileStats {
@@ -726,6 +850,20 @@ mod tests {
                     difficulty: "intermediate".into(),
                     os: "linux".into(),
                     status: "DONE".into(),
+                },
+            ],
+            releases: vec![
+                Release {
+                    date: "03-Sept".into(),
+                    name: "Arcane".into(),
+                    os: "linux".into(),
+                    released: true,
+                },
+                Release {
+                    date: "09-Sept".into(),
+                    name: "INVERNADERO_1.0".into(),
+                    os: "linux".into(),
+                    released: false,
                 },
             ],
         }
@@ -857,7 +995,7 @@ mod tests {
         assert!(state.popup.is_none());
         let action = state.pending_action.take().unwrap();
         assert_eq!(action.vm, "Nebula1");
-        assert_eq!(action.values, vec!["flag{abc}".to_string()]);
+        assert_eq!(action.values, vec![(0, "flag{abc}".to_string())]);
         assert_eq!(action.kind, PopupKind::Flag);
     }
 
@@ -953,8 +1091,103 @@ mod tests {
         let action = state.pending_action.take().unwrap();
         assert_eq!(
             action.values,
-            vec!["flag{user}".to_string(), "flag{root}".to_string()]
+            vec![(0, "flag{user}".to_string()), (1, "flag{root}".to_string())]
         );
+    }
+
+    #[test]
+    fn build_flag_report_labels_original_fields() {
+        use crate::modules::flag::FlagVerdict;
+
+        // User accepted, Root rejected.
+        let report = super::build_flag_report(
+            "Arcane",
+            vec![
+                (0, FlagVerdict::Correct),
+                (1, FlagVerdict::Wrong),
+            ],
+        );
+        assert_eq!(report.title, " Flag results — Arcane ");
+        assert_eq!(report.entries[0].0, ReportKind::Success);
+        assert_eq!(report.entries[0].1, "User flag: ✓ ACCEPTED");
+        assert_eq!(report.entries[1].0, ReportKind::Failure);
+        assert_eq!(report.entries[1].1, "Root flag: ✗ REJECTED");
+        assert!(report.changed);
+        assert_eq!(report.status, "[+] User ✓ · Root ✗");
+
+        // Root field only (index 1) keeps its Root label — not shifted.
+        let report = super::build_flag_report("Arcane", vec![(1, FlagVerdict::Wrong)]);
+        assert_eq!(report.entries[0].1, "Root flag: ✗ REJECTED");
+        assert!(!report.changed);
+
+        // Lone accepted flag keeps the celebratory footer.
+        let report = super::build_flag_report("Arcane", vec![(0, FlagVerdict::Correct)]);
+        assert_eq!(report.status, "[✓] You hacked Arcane!");
+
+        // All rejected -> no refresh.
+        let report = super::build_flag_report(
+            "Arcane",
+            vec![(0, FlagVerdict::Wrong), (1, FlagVerdict::Wrong)],
+        );
+        assert!(!report.changed);
+    }
+
+    #[test]
+    fn report_persists_until_dismissed_then_refreshes() {
+        use crate::modules::flag::FlagVerdict;
+
+        let mut state = app();
+        state.report = Some(super::build_flag_report(
+            "Arcane",
+            vec![(0, FlagVerdict::Correct)],
+        ));
+        state.pending_refresh_after_close = true;
+
+        // Any other key is swallowed while the report is open.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+        assert!(state.report.is_some());
+
+        // Dismissal queues the deferred refresh (Opsi A).
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(state.report.is_none());
+        assert!(state.refresh_requested);
+
+        // Without changes, closing never refreshes.
+        state.report = Some(super::build_flag_report(
+            "Arcane",
+            vec![(0, FlagVerdict::Wrong)],
+        ));
+        state.pending_refresh_after_close = false;
+        state.refresh_requested = false;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert!(!state.refresh_requested);
+    }
+
+    #[test]
+    fn releases_tab_lists_and_filters() {
+        let mut state = app();
+        for _ in 0..4 {
+            state.next_tab();
+        }
+        assert_eq!(state.tab, Tab::Releases);
+        assert_eq!(state.visible_releases().len(), 2);
+        assert_eq!(state.visible_releases()[0].name, "Arcane");
+
+        state.filter_push('i');
+        state.filter_push('n');
+        state.filter_push('v');
+        assert_eq!(state.visible_releases().len(), 1);
+        assert_eq!(state.visible_releases()[0].name, "INVERNADERO_1.0");
+        assert!(!state.visible_releases()[0].released);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::modules::releases::ReleaseScraper;
 use crate::modules::session::{login, HmvSession};
 use crate::modules::stats::{ProfileStats, StatsManager};
 use crate::modules::writeups::WriteupManager;
-use crate::tui::{TuiAction, TuiData};
+use crate::tui::{ActionReport, TuiAction, TuiData};
 
 /// Reusable authenticated session for the TUI's lifetime. Cloning an
 /// `HmvSession` is cheap (shared connection pool), so one login serves
@@ -57,11 +57,11 @@ pub async fn tui_cmd() -> Result<()> {
     )
 }
 
-/// Executes a user action from a TUI popup. Returns the footer message and
-/// whether dashboard data should be re-fetched. Flag actions carry one or
-/// two values (user & root); they are submitted in parallel and the verdicts
-/// are labeled by position — the API does not expose the flag level.
-async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<(String, bool)> {
+/// Executes a user action from a TUI popup. Returns the result popup
+/// content: verdicts labeled with the original field (User/Root flag),
+/// `changed` telling whether dashboard data must be refreshed after the
+/// popup closes.
+async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<ActionReport> {
     match action.kind {
         crate::tui::PopupKind::Flag => {
             use crate::modules::flag::FlagVerdict;
@@ -73,63 +73,68 @@ async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<(S
             let vm = action.vm.clone();
             let vm_ref = vm.as_str();
             let sessions_ref: &SessionCache = sessions;
-            let futures = action.values.iter().map(|flag| {
+            let futures = action.values.iter().map(|(field, flag)| {
                 let flag = flag.clone();
                 let vm = vm_ref;
                 async move {
                     FlagManager::new(sessions_ref.session())
                         .check(vm, &flag)
                         .await
+                        .map(|verdict| (*field, verdict))
                 }
             });
-            let results = futures_util::future::join_all(futures).await;
+            let results = futures_util::future::join_all(futures)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<(usize, FlagVerdict)>>>()?;
 
-            let mut changed = false;
-            let mut parts = Vec::new();
-            for (index, result) in results.into_iter().enumerate() {
-                let label = format!("Flag {}", index + 1);
-                let text = match result? {
-                    FlagVerdict::Correct => {
-                        changed = true;
-                        format!("{label}: [✓] accepted")
-                    }
-                    FlagVerdict::Wrong => format!("{label}: [!] rejected"),
-                    FlagVerdict::MachineNotFound => {
-                        format!("{label}: machine '{}' not found", action.vm)
-                    }
-                    FlagVerdict::Unknown(body) => format!("{label}: unknown response — {body}"),
-                };
-                parts.push(text);
-            }
-
-            if parts.len() == 1 && changed {
-                return Ok((format!("[✓] You hacked {}!", action.vm), changed));
-            }
-            Ok((parts.join(" · "), changed))
+            Ok(crate::tui::build_flag_report(&action.vm, results))
         }
         crate::tui::PopupKind::Upload => {
+            let url = action.values[0].1.clone();
             let verdict = WriteupManager::new(sessions.session())
-                .submit(&action.vm, &action.values[0])
+                .submit(&action.vm, &url)
                 .await?;
-            let message = match verdict {
-                crate::modules::writeups::UploadVerdict::Submitted => {
-                    format!("[✓] Writeup submitted for {}!", action.vm)
-                }
-                crate::modules::writeups::UploadVerdict::Repeated => {
-                    format!("[=] Writeup for {} was already submitted.", action.vm)
-                }
-                crate::modules::writeups::UploadVerdict::Rejected => {
-                    format!("[!] Server rejected writeup for {} — flags missing?", action.vm)
-                }
-                crate::modules::writeups::UploadVerdict::NotFound => {
-                    format!("[!] Machine '{}' not found.", action.vm)
-                }
-                crate::modules::writeups::UploadVerdict::Unknown(ref body) => {
-                    format!("[?] Unknown response: {body}")
-                }
+            use crate::tui::{ActionReport, ReportKind};
+            let (entries, changed, status) = match verdict {
+                crate::modules::writeups::UploadVerdict::Submitted => (
+                    vec![(
+                        ReportKind::Success,
+                        format!("Writeup: ✓ ACCEPTED — {}", url),
+                    )],
+                    true,
+                    format!("[✓] Writeup submitted for {}!", action.vm),
+                ),
+                crate::modules::writeups::UploadVerdict::Repeated => (
+                    vec![(ReportKind::Info, "Writeup: [=] ALREADY SUBMITTED".to_string())],
+                    false,
+                    format!("[=] Writeup for {} was already submitted.", action.vm),
+                ),
+                crate::modules::writeups::UploadVerdict::Rejected => (
+                    vec![(
+                        ReportKind::Failure,
+                        "Writeup: ✗ REJECTED — flags missing?".to_string(),
+                    )],
+                    false,
+                    format!("[!] Server rejected writeup for {}.", action.vm),
+                ),
+                crate::modules::writeups::UploadVerdict::NotFound => (
+                    vec![(ReportKind::Failure, format!("Machine '{}' not found", action.vm))],
+                    false,
+                    format!("[!] Machine '{}' not found.", action.vm),
+                ),
+                crate::modules::writeups::UploadVerdict::Unknown(ref body) => (
+                    vec![(ReportKind::Info, format!("Unknown response: {body}"))],
+                    false,
+                    format!("[?] Unknown response: {body}"),
+                ),
             };
-            let changed = matches!(verdict, crate::modules::writeups::UploadVerdict::Submitted);
-            Ok((message, changed))
+            Ok(ActionReport {
+                title: format!(" Writeup results — {} ", action.vm),
+                entries,
+                changed,
+                status,
+            })
         }
     }
 }
@@ -180,6 +185,13 @@ async fn fetch_tui_data(sessions: &SessionCache) -> Result<TuiData> {
         .map(|m| m.name.clone())
         .collect();
 
+    // Release schedule is nice-to-have: a failure here must not blank out
+    // the whole dashboard, so it degrades to an empty tab.
+    let releases = ReleaseScraper::new(session.clone())
+        .get_releases()
+        .await
+        .unwrap_or_default();
+
     Ok(TuiData {
         stats,
         progress: vec![
@@ -194,6 +206,7 @@ async fn fetch_tui_data(sessions: &SessionCache) -> Result<TuiData> {
         ],
         pending,
         catalog,
+        releases,
     })
 }
 

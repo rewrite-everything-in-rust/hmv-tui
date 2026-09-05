@@ -9,7 +9,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use super::{AppState, InputMode, Popup, PopupKind, Tab};
+use super::{
+    ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab,
+};
 
 const ACCENT: Color = Color::Rgb(117, 206, 122);
 const WARN: Color = Color::Rgb(255, 212, 130);
@@ -31,12 +33,16 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         Tab::Writeups => draw_writeups(frame, body, app),
         Tab::Pending => draw_pending(frame, body, app),
         Tab::Machines => draw_machines(frame, body, app),
+        Tab::Releases => draw_releases(frame, body, app),
     }
 
     draw_footer(frame, footer, app);
 
     if let Some(popup) = &app.popup {
         draw_popup(frame, frame.area(), popup);
+    }
+    if let Some(report) = &app.report {
+        draw_report(frame, frame.area(), report);
     }
 }
 
@@ -245,6 +251,11 @@ fn filter_block(app: &AppState) -> Block<'_> {
             app.visible_machines().len(),
             app.data.catalog.len()
         ),
+        Tab::Releases => format!(
+            " Releases {}/{} ",
+            app.visible_releases().len(),
+            app.data.releases.len()
+        ),
         Tab::Stats => String::new(),
     };
 
@@ -409,6 +420,94 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     frame.render_widget(Paragraph::new(lines).block(block), box_area);
 }
 
+fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
+    let visible = app.visible_releases();
+    let header = Row::new(["Date", "OS", "VM", "Status"])
+        .style(Style::new().fg(ACCENT).bold());
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .map(|r| {
+            let os_span = if r.os == "windows" {
+                Span::styled(r.os.clone(), Style::new().fg(Color::Cyan))
+            } else {
+                Span::styled(r.os.clone(), Style::new().fg(WARN))
+            };
+            let status_span = if r.released {
+                Span::styled("RELEASED", Style::new().fg(Color::Green).bold())
+            } else {
+                Span::styled("UPCOMING", Style::new().fg(Color::Magenta).bold())
+            };
+            Row::new([
+                Span::styled(r.date.clone(), Style::new().dim()),
+                os_span,
+                Span::styled(r.name.clone(), Style::new().fg(Color::White).bold()),
+                status_span,
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(24),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .row_highlight_style(
+        Style::new()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(filter_block(app));
+
+    let mut state = TableState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(table, area, &mut state);
+
+    app.set_visible_rows(visible_rows_in(area.height, visible.len()));
+}
+
+fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
+    let height = (report.entries.len() as u16 + 4).clamp(5, 12);
+    let width = 60;
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, box_area);
+
+    let mut lines = vec![Line::from("")];
+    for (kind, text) in &report.entries {
+        let span = match kind {
+            ReportKind::Success => Span::styled(text.clone(), Style::new().fg(Color::Green).bold()),
+            ReportKind::Failure => Span::styled(text.clone(), Style::new().fg(Color::Red).bold()),
+            ReportKind::Info => Span::styled(text.clone(), Style::new().fg(WARN)),
+        };
+        lines.push(Line::from(format!("  {span}")));
+        lines.push(Line::from(""));
+    }
+    let footer_hint = if report.changed {
+        "Data will refresh on close · Enter / Esc close"
+    } else {
+        "Enter / Esc close"
+    };
+    lines.push(Line::from(Span::styled(footer_hint, Style::new().dim())));
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            report.title.clone(),
+            Style::new().fg(ACCENT).bold(),
+        ))
+        .border_style(Style::new().fg(ACCENT));
+
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
 fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
     Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -436,6 +535,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
                     Tab::Writeups => "↑↓/jk move · / filter · Enter open · ".to_string(),
                     Tab::Pending => "↑↓/jk move · / filter · u writeup · ".to_string(),
                     Tab::Machines => "↑↓/jk move · / filter · f flag (user+root) · ".to_string(),
+                    Tab::Releases => "↑↓/jk move · / filter · ".to_string(),
                 };
                 let common = "r refresh · q quit";
                 if list_keys.is_empty() {
