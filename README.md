@@ -127,8 +127,8 @@ Three tabs driven entirely by the keyboard:
 | `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending** and **Machines** |
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` | Filter the current list (type to narrow, `Esc` clears) |
-| `f` | Submit a flag for the selected machine (popup input) |
-| `u` | Submit a writeup URL for the selected machine (popup input) |
+| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel) |
+| `u` | **Pending only** — submit a writeup URL for the pwned machine |
 | `Enter` | Open the selected writeup link in your browser |
 | `r` | Re-fetch all data |
 | `q` / `Esc` / `Ctrl-C` | Quit |
