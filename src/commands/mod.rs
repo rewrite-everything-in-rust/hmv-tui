@@ -15,7 +15,7 @@ use crate::modules::releases::ReleaseScraper;
 use crate::modules::session::login;
 use crate::modules::stats::{ProfileStats, StatsManager};
 use crate::modules::writeups::WriteupManager;
-use crate::tui::{AppState, TuiData};
+use crate::tui::TuiData;
 
 pub async fn config_cmd() -> Result<()> {
     println!("{} HackMyVM Account Configuration", style("[*]").blue().bold());
@@ -26,8 +26,9 @@ pub async fn config_cmd() -> Result<()> {
 }
 
 pub async fn tui_cmd() -> Result<()> {
-    let data = fetch_tui_data().await?;
-    crate::tui::run(AppState::new(data), || {
+    // Enter the TUI instantly with an empty state; the first fetch runs
+    // inside the event loop with a `⟳ Loading data...` indicator.
+    crate::tui::run(crate::tui::AppState::loading(), || {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(fetch_tui_data())
         })

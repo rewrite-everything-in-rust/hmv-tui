@@ -20,6 +20,17 @@ pub struct TuiData {
     pub pending: Vec<String>,
 }
 
+impl TuiData {
+    /// Placeholder shown while the first fetch is still running.
+    pub fn empty() -> Self {
+        Self {
+            stats: ProfileStats::default(),
+            progress: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Stats,
@@ -64,9 +75,10 @@ pub struct AppState {
     /// First visible row for the active list (manual scrolling window).
     pub scroll: usize,
     pub quit: bool,
+    /// Set by `r`; consumed when the event loop is idle.
     pub refresh_requested: bool,
-    /// True while the blocking data re-fetch is running.
-    pub refreshing: bool,
+    /// When set, the footer shows `⟳ <label>` while a blocking fetch runs.
+    pub fetching: Option<&'static str>,
     pub status: Option<String>,
     /// When the status message should disappear (5s lifetime).
     pub status_expiry: Option<std::time::Instant>,
@@ -88,12 +100,19 @@ impl AppState {
             scroll: 0,
             quit: false,
             refresh_requested: false,
-            refreshing: false,
+            fetching: None,
             status: None,
             status_expiry: None,
             data,
             last_visible_rows: None,
         }
+    }
+
+    /// Entry state for `hmv tui`: draws immediately, then loads all data.
+    pub fn loading() -> Self {
+        let mut state = Self::new(TuiData::empty());
+        state.fetching = Some("Loading data...");
+        state
     }
 
     /// Shows a status message in the footer, auto-expiring after 5 seconds.
@@ -251,16 +270,21 @@ impl AppState {
         self.quit = true;
     }
 
+    /// Manual refresh: only allowed while idle to keep the state machine sane.
     pub fn request_refresh(&mut self) {
-        self.refresh_requested = true;
-        self.set_status("Refreshing data...");
+        if self.fetching.is_none() {
+            self.fetching = Some("Refreshing data...");
+            self.refresh_requested = true;
+        }
     }
 }
 
-/// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on `r`.
+/// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on demand.
 pub fn run(mut app: AppState, refetch: impl Fn() -> Result<TuiData>) -> Result<()> {
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &refetch);
+    // Kick off the first load (and any pending request) before looping.
+    let mut pending_fetch = app.fetching.is_some();
+    let result = event_loop(&mut terminal, &mut app, &refetch, &mut pending_fetch);
     ratatui::restore();
     result
 }
@@ -269,6 +293,7 @@ fn event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
     refetch: &dyn Fn() -> Result<TuiData>,
+    pending_fetch: &mut bool,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
@@ -283,21 +308,21 @@ fn event_loop(
 
         app.tick();
 
-        if app.refresh_requested {
+        if *pending_fetch || (app.refresh_requested && app.fetching.is_none()) {
+            *pending_fetch = false;
             app.refresh_requested = false;
-            app.refreshing = true;
-            // Draw immediately so the spinner/status shows while the
-            // blocking re-fetch runs, instead of freezing silently.
+            // Draw immediately so the `⟳ <label>` shows while the blocking
+            // fetch runs, instead of freezing silently.
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
             let result = refetch();
-            app.refreshing = false;
+            app.fetching = None;
             match result {
                 Ok(data) => {
                     app.set_data(data);
                     app.set_status("Data refreshed.");
                 }
-                Err(error) => app.set_status(format!("Refresh failed: {error:#}")),
+                Err(error) => app.set_status(format!("Fetch failed: {error:#}")),
             }
         }
 
@@ -443,16 +468,29 @@ mod tests {
     }
 
     #[test]
-    fn request_refresh_flags_refreshing() {
+    fn request_refresh_flags_fetching() {
         let mut state = app();
-        assert!(!state.refreshing);
+        assert!(state.fetching.is_none());
         state.request_refresh();
         assert!(state.refresh_requested);
-        assert_eq!(state.status.as_deref(), Some("Refreshing data..."));
+        assert_eq!(state.fetching, Some("Refreshing data..."));
 
+        // While a fetch is running, further requests are ignored.
         state.refresh_requested = false;
-        state.refreshing = true;
-        assert!(state.refreshing);
+        state.request_refresh();
+        assert!(!state.refresh_requested);
+        assert_eq!(state.fetching, Some("Refreshing data..."));
+    }
+
+    #[test]
+    fn loading_state_shows_placeholder() {
+        let state = AppState::loading();
+        assert_eq!(state.fetching, Some("Loading data..."));
+        assert!(state.data.stats.accepted_writeups.is_empty());
+        assert!(state.data.pending.is_empty());
+        // Lists stay safe to render with no data.
+        assert!(state.visible_writeups().is_empty());
+        assert!(state.visible_pending().is_empty());
     }
 
     #[test]

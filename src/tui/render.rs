@@ -275,8 +275,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     };
     frame.render_widget(Paragraph::new(Span::styled(keys, Style::new().dim())), keys_area);
 
-    let status = if app.refreshing {
-        Span::styled("⟳ Refreshing data...", Style::new().fg(WARN).bold())
+    let status = if let Some(label) = app.fetching {
+        Span::styled(format!("⟳ {label}"), Style::new().fg(WARN).bold())
     } else {
         match (&app.status, app.status_expiry) {
             (Some(message), Some(expiry)) if std::time::Instant::now() < expiry => {
