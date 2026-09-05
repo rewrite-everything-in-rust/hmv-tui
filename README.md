@@ -2,7 +2,9 @@
 
 ### HackMyVM Advanced Versatile Operations CLI Toolkit
 
-**HMV-CLI** is a modern command-line toolkit designed specifically for the HackMyVM community. It allows you to search for machines, download VMs, submit flags, and view community writeups efficiently directly from your terminal with fast performance and an intuitive interface.
+**HMV-CLI** is a modern toolkit designed specifically for the HackMyVM community. It lets you search for machines, download VMs, submit flags, and view community writeups efficiently, directly from your terminal.
+
+Since **v0.7.0**, running `hmv` opens the **interactive dashboard (TUI)** — that is the primary interface. The classic CLI subcommands (`hmv stats`, `hmv machine ...`) remain fully available for scripting and one-liners.
 
 This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com/setyanoegraha/hackmyvm-commandlineinterface) — a single static binary, no Python runtime required.
 
@@ -10,7 +12,9 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
 
 ## Key Features
 
-* **Secure Auth**: Securely stores your credentials using the system vault (Linux keyutils / Secret Service, Windows Credential Manager, macOS Keychain) via the `keyring` library. Only the username touches `~/.hmv/config.json`.
+* **Dashboard-first**: bare `hmv` opens the interactive TUI dashboard — your stats, accepted writeups, pending writeups, the full machine catalog and downloads in one screen.
+* **First-run config popup**: no manual setup — the dashboard walks you through account configuration on first launch (or when the stored password stopped working).
+* **Secure Auth**: credentials are stored using the system vault (Linux keyutils / Secret Service, Windows Credential Manager, macOS Keychain) via the `keyring` library. Only the username and your last download folder touch `~/.hmv/config.json`.
 * **Personal Statistics** (`hmv stats`): rank, title, country, points, roots/users, challenges, writeups, trophies and visual progress bars per difficulty.
 * **Machine Management**:
     * Smart paginated machine listing (max 3 concurrent page fetches).
@@ -20,8 +24,7 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
     * Upcoming machine **release schedule** (`hmv machine -r`).
 * **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars — up to **2 VMs in parallel** (`-d a -d b`). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
 * **Flag Submission**: Submit flags with clear visual feedback — including **dual user/root flag submission** in one command (`-f <user> -f <root>`, max 2, concurrent).
-* **Writeups Access**: View community writeups (articles or videos) without opening a browser. **Submit your own writeup** directly from the CLI (`-w --upload <url>`) once both flags are pwned.
-* **Interactive Dashboard** (`hmv tui`): a ratatui-powered TUI with your stats & progress gauges, all accepted writeups (filterable, open links in the browser), the list of pwned machines still missing a writeup, and the **full machine catalog** — submit flags (`f`) and writeup links (`u`) directly from popups without leaving the dashboard.
+* **Writeups Access**: View community writeups (articles or videos) without opening a browser. **Submit your own writeup** directly (`-w --upload <url>`) once both flags are pwned.
 
 ---
 
@@ -53,41 +56,89 @@ cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git
 
 ---
 
-## Initial Configuration
+## First Setup
 
-Just run `hmv` — on first run the dashboard opens straight into a configuration popup where you enter your HackMyVM username and password. The credentials are validated by logging in, then stored.
+Nothing to configure by hand — just run `hmv`:
 
-You can also configure from the command line at any time:
+```bash
+hmv
+```
+
+On the very first run (or when the stored password no longer works) the dashboard opens a **Configure HackMyVM** popup:
+
+1. Type your HackMyVM **username**, then press `Tab` / `↓`.
+2. Type your **password** (hidden as `•••`), then press `Enter`.
+
+Credentials are validated with a real login **before** anything is saved. If the login fails, the popup reopens with your username kept; `Esc` quits the app.
+
+Prefer the terminal, or need to switch accounts later? Use the classic command:
 
 ```bash
 hmv config
 ```
 
-**NOTE:** Your password is encrypted by the operating system and is not stored in plain text.
+**Where your data lives:** the username and the last download folder are stored in `~/.hmv/config.json`; the password never touches disk — it goes into your OS vault (keyutils / Secret Service on Linux, Credential Manager on Windows, Keychain on macOS).
 
 ---
 
 ## Usage Guide
 
-### General Commands
+Two ways to drive HMV-CLI: the **interactive dashboard** (primary) and the **CLI subcommands** (scripts & one-liners). Both use the same stored account.
+
+### 1. Interactive Dashboard — just run `hmv`
+
+```bash
+hmv
+```
+
+(`hmv tui` does the same.) Five keyboard-driven tabs:
+
+| Keys | Action |
+| :--- | :--- |
+| `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending**, **Machines** and **Releases** |
+| `↑` `↓` / `j` `k` | Move selection |
+| `g` / `Home` | Jump to the top of the list |
+| `/` | Filter the current list (type to narrow, `Enter` keeps it, `Esc` clears & exits) |
+| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
+| `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified before the file lands. |
+| `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
+| `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
+| `o` | Toggle the **Downloads** overlay (live gauges, speed, final paths). Closing it never stops running downloads. |
+| `c` | **In the Downloads overlay** — cancel the most recent active download (the staged `.part` file is cleaned). |
+| `Enter` | Open the selected writeup link in your browser (**Writeups tab** and writeups popup). |
+| `r` | Re-fetch all data |
+| `q` / `Esc` / `Ctrl-C` | Quit (with active downloads, the first `q` lists them — press `q` again to abort). |
+
+- **Stats** — identity, achievements, trophies and animated progress gauges per difficulty.
+- **Writeups** — every writeup accepted on HackMyVM (VM, language, link).
+- **Pending** — machines you fully pwned (user + root flags) that still have no accepted writeup.
+- **Machines** — the complete catalog (VM, difficulty, creator, size, status) with color-coded difficulty.
+- **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
+
+Actions submitted from the TUI show their verdicts in a result popup that stays until dismissed (`User flag: ✓ ACCEPTED`, `Root flag: ✗ REJECTED`, ...) and trigger an automatic data refresh on close when your progress changed.
+
+Downloads run in the background (max 2 in parallel, extra ones queue): the Downloads overlay shows live gauges, speed and the final path; downloads keep running when the overlay is closed; quitting while a download is active asks for a second `q`.
+
+### 2. CLI for Scripting & One-liners
 
 | Command | Function |
 | :--- | :--- |
-| `hmv` | Launch the interactive dashboard (first run opens an in-TUI configuration popup). |
+| `hmv` / `hmv tui` | Launch the interactive dashboard. |
+| `hmv config` | (Re)configure your HackMyVM account. |
 | `hmv stats` | Show your personal stats: rank, points, trophies and progress. |
-| `hmv machine -l` | Show the latest 20 machines from HackMyVM. |
+| `hmv machine -l` | Show the latest 20 machines (`-p <n>` for another page). |
 | `hmv machine -a` | Show the entire machine catalog in one large table. |
 | `hmv machine -n <name>` | Search for machines by name (e.g., `hmv machine -n hunter`). |
-| `hmv machine -s <filter>` | Sorting / Filtering the machines by some category (e.g., `hmv machine -s beginner`). |
+| `hmv machine -s <filter>` | Filter / sort by category: `beginner`, `intermediate`, `advanced`, `linux`, `windows`, `size`, `hacked`, `all`. |
 | `hmv machine -r` | Show the upcoming machine release schedule. |
-| `hmv machine -d <name>` | Download for machine by name (e.g., `hmv machine -d redacted`). |
+| `hmv machine -d <name>` | Download a machine by name (e.g., `hmv machine -d redacted`). |
 | `hmv machine -d <a> -d <b>` | Download two machines in parallel. |
-| `hmv machine -v <name> -f <flag>` | Submit flag for some machine (e.g, `hmv machine -v fuzzz -f flag{abc}`). |
+| `hmv machine -v <name> -f <flag>` | Submit a flag (e.g., `hmv machine -v fuzzz -f flag{abc}`). |
 | `hmv machine -v <name> -f <f1> -f <f2>` | Submit user & root flags concurrently. |
-| `hmv machine -v <name> -w` | See write-up for machine from community (e.g., `hmv machine -v skid -w`). |
+| `hmv machine -v <name> -w` | View community writeups for a machine (e.g., `hmv machine -v skid -w`). |
 | `hmv machine -v <name> -w --upload <url>` | Submit your writeup link for a machine (requires both flags submitted). |
 
-### Personal Statistics
+#### Personal Statistics
 
 ```bash
 hmv stats
@@ -110,66 +161,30 @@ Intermediate  [--------------------] 2 / 136
 Advanced      [--------------------] 1 / 64
 ```
 
-### Release Schedule
+#### Release Schedule
 
 ```bash
 hmv machine -r
 ```
 
-### Interactive Dashboard (TUI)
+#### VM Interaction
 
 ```bash
-hmv tui
+hmv machine -d <vm_name>              # Download a VM
+hmv machine -v <vm_name> -w           # View community writeups
+hmv machine -v <vm_name> -f <flag>    # Submit a flag
 ```
 
-Five tabs driven entirely by the keyboard:
+#### Filter & Sort Examples
 
-| Keys | Action |
-| :--- | :--- |
-| `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending**, **Machines** and **Releases** |
-| `↑` `↓` / `j` `k` | Move selection |
-| `/` | Filter the current list (type to narrow, `Esc` clears) |
-| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
-| `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified; `c` cancels. |
-| `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
-| `o` | Toggle the **Downloads** overlay (live gauges, speed, final paths). Closing it never stops running downloads. |
-| `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
-| `Enter` | Open the selected writeup link in your browser |
-| `r` | Re-fetch all data |
-| `q` / `Esc` / `Ctrl-C` | Quit |
+* **By OS:** `hmv machine -s linux -a` or `hmv machine -s windows -a`
+* **By difficulty:** `hmv machine -s beginner -a`
+* **By size:** `hmv machine -s size -a`
+* **Only machines you pwned:** `hmv machine -s hacked -a`
 
-- **Stats** — identity, achievements, trophies and animated progress gauges per difficulty.
-- **Writeups** — every writeup accepted on HackMyVM (VM, language, link).
-- **Pending** — machines you fully pwned (user + root flags) that still have no accepted writeup.
-- **Machines** — the complete catalog (VM, difficulty, creator, size, status) with color-coded difficulty.
-- **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
+---
 
-Actions submitted from the TUI show their verdicts in a result popup that stays until dismissed (`User flag: ✓ ACCEPTED`, `Root flag: ✗ REJECTED`, ...) and trigger an automatic data refresh on close when your progress changed.
-
-Downloads run in the background (max 2 in parallel, extra ones queue): the Downloads overlay shows live gauges, speed and the final path; downloads keep running when the overlay is closed; `c` cancels and cleans the staged `.part` file; quitting while a download is active asks for a second `q`.
-
-### VM Interaction
-
-* **Download VM:**
-    ```bash
-    hmv machine -d <vm_name>
-    ```
-* **View Writeups:**
-    ```bash
-    hmv machine -v <vm_name> -w
-    ```
-* **Submit Flag:**
-    ```bash
-    hmv machine -v <vm_name> -f <flag_token>
-    ```
-
-### Show All Machine based on Filtering & Sorting
-
-* **By OS:** `hmv machine -s linux -a`
-* **By Difficulty:** `hmv machine -s beginner -a`
-* **By Size:** `hmv machine -s size -a`
-
-### Updating
+## Updating
 
 ```bash
 cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git --force
