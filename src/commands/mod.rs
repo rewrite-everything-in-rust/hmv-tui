@@ -37,18 +37,18 @@ pub async fn tui_cmd() -> Result<()> {
 
 /// Fetches every dataset the dashboard shows: profile stats + accepted
 /// writeups, and the pwned catalog for gauges & pending machines.
+/// No terminal output here — the TUI owns the screen and reports progress
+/// through its footer (`⟳ Loading data...` / `⟳ Refreshing data...`).
 async fn fetch_tui_data() -> Result<TuiData> {
     let cfg = ConfigManager::new();
     let session = login(&cfg).await?;
     let (username, _) = cfg.load_credentials()?;
 
-    let fetching = crate::ui::spinner("Fetching dashboard data...");
     let stats = StatsManager::new(session.clone()).get_stats(&username).await?;
 
     let scraper = MachineScraper::new(session.clone());
     let mut catalog = machine::fetch_catalog(&scraper, "all").await?;
     machine::sync_pwned_status(&scraper, &mut catalog).await?;
-    fetching.finish_and_clear();
 
     let total_vms = catalog.len() as u64;
     let pwned_vms = catalog.iter().filter(|m| m.status != "TO HACK").count() as u64;
