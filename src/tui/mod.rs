@@ -65,11 +65,18 @@ pub struct AppState {
     pub scroll: usize,
     pub quit: bool,
     pub refresh_requested: bool,
+    /// True while the blocking data re-fetch is running.
+    pub refreshing: bool,
     pub status: Option<String>,
+    /// When the status message should disappear (5s lifetime).
+    pub status_expiry: Option<std::time::Instant>,
     pub data: TuiData,
     /// Row budget reported by the renderer after layout.
     pub last_visible_rows: Option<usize>,
 }
+
+/// How long a status message stays visible in the footer.
+const STATUS_LIFETIME: Duration = Duration::from_secs(5);
 
 impl AppState {
     pub fn new(data: TuiData) -> Self {
@@ -81,9 +88,27 @@ impl AppState {
             scroll: 0,
             quit: false,
             refresh_requested: false,
+            refreshing: false,
             status: None,
+            status_expiry: None,
             data,
             last_visible_rows: None,
+        }
+    }
+
+    /// Shows a status message in the footer, auto-expiring after 5 seconds.
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.status = Some(message.into());
+        self.status_expiry = Some(std::time::Instant::now() + STATUS_LIFETIME);
+    }
+
+    /// Clears expired status messages; called once per event-loop iteration.
+    pub fn tick(&mut self) {
+        if let Some(expiry) = self.status_expiry {
+            if std::time::Instant::now() >= expiry {
+                self.status = None;
+                self.status_expiry = None;
+            }
         }
     }
 
@@ -215,7 +240,7 @@ impl AppState {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
-            self.status = Some(match opened {
+            self.set_status(match opened {
                 Ok(_) => format!("Opened in browser: {url}"),
                 Err(error) => format!("xdg-open failed: {error}"),
             });
@@ -228,7 +253,7 @@ impl AppState {
 
     pub fn request_refresh(&mut self) {
         self.refresh_requested = true;
-        self.status = Some("Refreshing data...".to_string());
+        self.set_status("Refreshing data...");
     }
 }
 
@@ -256,14 +281,23 @@ fn event_loop(
             }
         }
 
+        app.tick();
+
         if app.refresh_requested {
             app.refresh_requested = false;
-            match refetch() {
+            app.refreshing = true;
+            // Draw immediately so the spinner/status shows while the
+            // blocking re-fetch runs, instead of freezing silently.
+            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+            let result = refetch();
+            app.refreshing = false;
+            match result {
                 Ok(data) => {
                     app.set_data(data);
-                    app.status = Some("Data refreshed.".to_string());
+                    app.set_status("Data refreshed.");
                 }
-                Err(error) => app.status = Some(format!("Refresh failed: {error:#}")),
+                Err(error) => app.set_status(format!("Refresh failed: {error:#}")),
             }
         }
 
@@ -389,6 +423,36 @@ mod tests {
             state.move_down();
         }
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn status_expires_after_lifetime() {
+        let mut state = app();
+        state.set_status("Data refreshed.");
+        assert!(state.status.is_some());
+
+        // Not yet expired.
+        state.tick();
+        assert!(state.status.is_some());
+
+        // Simulate expiry passing.
+        state.status_expiry = Some(std::time::Instant::now() - Duration::from_secs(1));
+        state.tick();
+        assert!(state.status.is_none());
+        assert!(state.status_expiry.is_none());
+    }
+
+    #[test]
+    fn request_refresh_flags_refreshing() {
+        let mut state = app();
+        assert!(!state.refreshing);
+        state.request_refresh();
+        assert!(state.refresh_requested);
+        assert_eq!(state.status.as_deref(), Some("Refreshing data..."));
+
+        state.refresh_requested = false;
+        state.refreshing = true;
+        assert!(state.refreshing);
     }
 
     #[test]

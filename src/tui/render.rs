@@ -263,23 +263,31 @@ fn filter_block(app: &AppState) -> Block<'_> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
-    let status = app
-        .status
-        .clone()
-        .map(|s| format!("  {s}"))
-        .unwrap_or_default();
+    let [keys_area, status_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Max(60),
+    ])
+    .areas(area);
 
     let keys = match app.input_mode {
         InputMode::Filter => "Enter confirm · Esc clear & exit filter",
         InputMode::Normal => "Tab tabs · ↑↓/jk move · / filter · Enter open · r refresh · q quit",
     };
+    frame.render_widget(Paragraph::new(Span::styled(keys, Style::new().dim())), keys_area);
 
+    let status = if app.refreshing {
+        Span::styled("⟳ Refreshing data...", Style::new().fg(WARN).bold())
+    } else {
+        match (&app.status, app.status_expiry) {
+            (Some(message), Some(expiry)) if std::time::Instant::now() < expiry => {
+                Span::styled(message.clone(), Style::new().fg(WARN))
+            }
+            _ => Span::raw(""),
+        }
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(keys, Style::new().dim()),
-            Span::styled(status, Style::new().fg(WARN)),
-        ])),
-        area,
+        Paragraph::new(status).alignment(ratatui::layout::Alignment::Right),
+        status_area,
     );
 }
 
