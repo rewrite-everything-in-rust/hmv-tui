@@ -69,7 +69,7 @@ async fn fetch_public_file(url: &str) -> Result<(PublicFile, FileKeys)> {
     let request = serde_json::json!([{"a": "g", "g": 1, "p": file_id}]);
 
     let response = reqwest::Client::builder()
-        .user_agent("HMV-CLI/0.2.0")
+        .user_agent(concat!("HMV-CLI/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(160))
         .build()?
         .post(format!("{API_URL}?id={sequence}&n={file_id}"))

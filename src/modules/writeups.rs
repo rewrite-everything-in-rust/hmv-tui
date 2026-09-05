@@ -10,12 +10,13 @@ pub struct WriteupManager {
     session: HmvSession,
 }
 
+#[derive(Debug, Clone)]
 pub struct Writeup {
-    date: String,
-    author: String,
-    language: String,
-    format: String,
-    url: String,
+    pub date: String,
+    pub author: String,
+    pub language: String,
+    pub format: String,
+    pub url: String,
 }
 
 impl WriteupManager {
@@ -23,19 +24,31 @@ impl WriteupManager {
         Self { session }
     }
 
-    pub async fn get_writeups(&self, vm_name: &str) -> Result<()> {
-        let sp = spinner(vm_name);
+    /// Network-only fetch of the community writeups for a VM. Empty list =
+    /// the machine exists but has no accepted writeups. Callers render.
+    pub async fn fetch(&self, vm_name: &str) -> Result<Vec<Writeup>> {
         let html = self
             .session
             .get(&format!("/machines/machine.php?vm={vm_name}"))
             .await?;
 
         if machine_missing(&html) {
-            sp.finish_and_clear();
             return Err(crate::modules::HmvError::MachineNotFound(vm_name.to_string()).into());
         }
 
-        let writeups = parse_writeups(&html);
+        Ok(parse_writeups(&html))
+    }
+
+    /// CLI wrapper around [`Self::fetch`] with spinner and printed table.
+    pub async fn get_writeups(&self, vm_name: &str) -> Result<()> {
+        let sp = spinner(vm_name);
+        let writeups = match self.fetch(vm_name).await {
+            Ok(writeups) => writeups,
+            Err(error) => {
+                sp.finish_and_clear();
+                return Err(error);
+            }
+        };
         sp.finish_and_clear();
 
         if writeups.is_empty() {
@@ -164,18 +177,6 @@ fn machine_missing(html: &str) -> bool {
         || html.to_lowercase().contains("machine not found")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_canonical_vm_from_hidden_field() {
-        let html = r#"<form action="checkwriteup.php" method="post"><input name="vm" type="hidden" value="Fuxa" /></form>"#;
-        assert_eq!(extract_hidden_vm(html).as_deref(), Some("Fuxa"));
-        assert_eq!(extract_hidden_vm("<html></html>"), None);
-    }
-}
-
 fn spinner(vm_name: &str) -> indicatif::ProgressBar {
     crate::ui::spinner(format!("Fetching writeup list for {vm_name}..."))
 }
@@ -268,4 +269,16 @@ fn print_table(vm_name: &str, writeups: &[Writeup]) {
             .bold()
     );
     println!("{table}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_canonical_vm_from_hidden_field() {
+        let html = r#"<form action="checkwriteup.php" method="post"><input name="vm" type="hidden" value="Fuxa" /></form>"#;
+        assert_eq!(extract_hidden_vm(html).as_deref(), Some("Fuxa"));
+        assert_eq!(extract_hidden_vm("<html></html>"), None);
+    }
 }

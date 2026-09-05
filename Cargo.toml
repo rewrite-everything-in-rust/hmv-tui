@@ -1,6 +1,6 @@
 [package]
 name = "hmv"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "HMV-CLI: HackMyVM Advanced Versatile Operations CLI - A powerful toolkit for machine management"
 license = "MIT"

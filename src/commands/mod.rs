@@ -54,6 +54,13 @@ pub async fn tui_cmd() -> Result<()> {
                 tokio::runtime::Handle::current().block_on(run_tui_action(&sessions, action))
             })
         },
+        |vm| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(
+                    WriteupManager::new(sessions.session()).fetch(vm),
+                )
+            })
+        },
     )
 }
 

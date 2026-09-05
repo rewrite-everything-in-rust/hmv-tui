@@ -129,6 +129,7 @@ Three tabs driven entirely by the keyboard:
 | `/` | Filter the current list (type to narrow, `Esc` clears) |
 | `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
 | `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified; `c` cancels. |
+| `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
 | `o` | Toggle the **Downloads** overlay (live gauges, speed, final paths). Closing it never stops running downloads. |
 | `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
 | `Enter` | Open the selected writeup link in your browser |

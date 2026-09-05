@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use super::{
     ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab, ViewMode,
-    downloads::Phase,
+    WriteupsPopup, downloads::Phase,
 };
 
 const ACCENT: Color = Color::Rgb(117, 206, 122);
@@ -47,6 +47,11 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
     }
     if let Some(report) = &app.report {
         draw_report(frame, frame.area(), report);
+    }
+    if app.writeups_popup.is_some() {
+        if let Some(popup) = app.writeups_popup.clone() {
+            draw_writeups_popup(frame, frame.area(), &popup);
+        }
     }
 }
 
@@ -515,6 +520,70 @@ fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
         .border_style(Style::new().fg(ACCENT));
 
     frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
+fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
+    let rows: Vec<Row> = popup
+        .entries
+        .iter()
+        .map(|w| {
+            let lang_style = if w.language.contains("English") {
+                Style::new().fg(Color::Green)
+            } else {
+                Style::new().fg(WARN)
+            };
+            let format_style = if w.format.contains("Read") {
+                Style::new().fg(Color::Cyan)
+            } else {
+                Style::new().fg(Color::Magenta)
+            };
+            Row::new(vec![
+                Span::styled(w.date.clone(), Style::new().dim()),
+                Span::styled(w.author.clone(), Style::new().fg(Color::White).bold()),
+                Span::styled(w.language.clone(), lang_style),
+                Span::styled(w.format.to_uppercase(), format_style),
+                Span::styled(w.url.clone(), Style::new().fg(Color::Blue).dim()),
+            ])
+        })
+        .collect();
+
+    let height = (popup.entries.len() as u16 + 3).clamp(6, 18);
+    let box_area = popup_area(area, 92, height);
+    frame.render_widget(Clear, box_area);
+
+    let header = Row::new(["Date", "Author (Poet)", "Language", "Format", "Link"])
+        .style(Style::new().fg(ACCENT).bold());
+    let hint = Row::new([" ", " ", " ", " ", "Enter open link · jk select · Esc close"])
+        .style(Style::new().dim());
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(16),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .footer(hint)
+    .row_highlight_style(
+        Style::new()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(
+        Block::bordered()
+            .title(Span::styled(
+                format!(" Writeups — {} ", popup.vm),
+                Style::new().fg(ACCENT).bold(),
+            ))
+            .border_style(Style::new().fg(ACCENT)),
+    );
+
+    let mut state = TableState::default().with_selected(Some(popup.selected));
+    frame.render_stateful_widget(table, box_area, &mut state);
 }
 
 fn popup_area(area: Rect, width: u16, height: u16) -> Rect {

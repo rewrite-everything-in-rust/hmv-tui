@@ -11,25 +11,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use std::path::PathBuf;
-
-/// Temporary file logger for live debugging (kept tiny; no-op on write errors).
-#[allow(dead_code)] // kept for future live debugging
-pub fn debug_log(message: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/opencode/hmv_debug.log")
-    {
-        let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), message);
-    }
-}
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::modules::flag::FlagVerdict;
 use crate::modules::machines::Machine;
 use crate::modules::releases::Release;
 use crate::modules::stats::{ProfileStats, ProfileWriteup};
+use crate::modules::writeups::Writeup;
 
 /// What a popup asks the user for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +124,29 @@ pub struct ActionReport {
     pub status: String,
 }
 
+/// Community writeups for one machine, fetched on demand (`w`) and rendered
+/// as a table popup. `selected` indexes into `entries` for Enter-to-open.
+#[derive(Debug, Clone)]
+pub struct WriteupsPopup {
+    pub vm: String,
+    pub entries: Vec<Writeup>,
+    pub selected: usize,
+}
+
+impl WriteupsPopup {
+    pub fn move_selection(&mut self, delta: isize) {
+        let last = self.entries.len().saturating_sub(1);
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(last);
+    }
+
+    pub fn selected_url(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(|w| w.url.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Stats,
@@ -218,6 +229,10 @@ pub struct AppState {
     pub download_queue: std::collections::VecDeque<(String, PathBuf)>,
     /// Action result popup (persists until dismissed).
     pub report: Option<ActionReport>,
+    /// Community-writeups popup for one machine (`w`, Machines/Pending).
+    pub writeups_popup: Option<WriteupsPopup>,
+    /// VM whose writeups must be fetched when the event loop goes idle.
+    pub pending_writeups: Option<String>,
     /// Refresh queued for when the report popup closes (Opsi A).
     pub pending_refresh_after_close: bool,
     pub data: TuiData,
@@ -248,6 +263,8 @@ impl AppState {
             pending_action: None,
             download_queue: std::collections::VecDeque::new(),
             report: None,
+            writeups_popup: None,
+            pending_writeups: None,
             pending_refresh_after_close: false,
             data,
             last_visible_rows: None,
@@ -295,11 +312,12 @@ impl AppState {
                 .filter(|job| job.is_active())
                 .map(|job| {
                     let state = job.state.lock().unwrap();
-                    let pct = if state.total > 0 {
-                        format!(" {}%", (state.downloaded * 100 / state.total))
-                    } else {
-                        String::new()
-                    };
+                    let pct = state
+                        .downloaded
+                        .checked_mul(100)
+                        .and_then(|pct| pct.checked_div(state.total))
+                        .map(|pct| format!(" {pct}%"))
+                        .unwrap_or_default();
                     format!("↓ {}{pct}", job.vm)
                 })
                 .collect();
@@ -472,7 +490,7 @@ impl AppState {
                 .selected_machine()
                 .map(|m| m.status.to_uppercase())
                 .unwrap_or_default();
-            if status.contains("PWNED") || status.contains("DONE") && status == "PWNED" {
+            if status.contains("PWNED") {
                 // Fully completed machine: show an info box, no inputs.
                 self.popup = Some(Popup {
                     kind,
@@ -524,6 +542,48 @@ impl AppState {
             notice: None,
             readonly: false,
         });
+    }
+
+    /// Queues a writeups fetch for the selected machine; the event loop
+    /// runs the (blocking) fetch, then opens the popup. Gated to the
+    /// Machines and Pending tabs.
+    pub fn open_writeups_popup(&mut self) {
+        if self.writeups_popup.is_some() || self.popup.is_some() || self.report.is_some() {
+            return;
+        }
+        if !matches!(self.tab, Tab::Machines | Tab::Pending) {
+            self.set_status("Writeups are available on the Machines and Pending tabs.");
+            return;
+        }
+        let Some(vm) = self.selected_machine_name() else {
+            self.set_status("Nothing selected to inspect.");
+            return;
+        };
+        self.pending_writeups = Some(vm);
+    }
+
+    /// Opens the selected writeup of the current writeups popup in a browser.
+    pub fn open_selected_writeup_link(&mut self) {
+        let Some(popup) = self.writeups_popup.as_ref() else {
+            return;
+        };
+        let Some(url) = popup.selected_url() else {
+            return;
+        };
+        let opened = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        self.set_status(match opened {
+            Ok(_) => format!("Opened in browser: {url}"),
+            Err(error) => format!("xdg-open failed: {error}"),
+        });
+    }
+
+    /// Closes the writeups popup (Esc / q).
+    pub fn close_writeups_popup(&mut self) {
+        self.writeups_popup = None;
     }
 
     /// Confirms the popup: queues the action and closes the popup.
@@ -747,16 +807,25 @@ pub fn build_flag_report(vm: &str, results: Vec<(usize, FlagVerdict)>) -> Action
 
 /// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on
 /// demand; `run_action` executes a user action (flag/upload) and returns an
-/// `ActionReport` for the result popup.
+/// `ActionReport` for the result popup; `run_writeups_fetch` fetches the
+/// community writeups for a machine (blocking, network-only).
 pub fn run(
     mut app: AppState,
     refetch: impl Fn() -> Result<TuiData>,
     run_action: impl Fn(TuiAction) -> Result<ActionReport>,
+    run_writeups_fetch: impl Fn(&str) -> Result<Vec<Writeup>>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     // Kick off the first load (and any pending request) before looping.
     let mut pending_fetch = app.fetching.is_some();
-    let result = event_loop(&mut terminal, &mut app, &refetch, &run_action, &mut pending_fetch);
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &refetch,
+        &run_action,
+        &run_writeups_fetch,
+        &mut pending_fetch,
+    );
     ratatui::restore();
     result
 }
@@ -766,6 +835,7 @@ fn event_loop(
     app: &mut AppState,
     refetch: &dyn Fn() -> Result<TuiData>,
     run_action: &dyn Fn(TuiAction) -> Result<ActionReport>,
+    run_writeups_fetch: &dyn Fn(&str) -> Result<Vec<Writeup>>,
     pending_fetch: &mut bool,
 ) -> Result<()> {
     loop {
@@ -812,6 +882,32 @@ fn event_loop(
                     Err(error) => app.set_status(format!("Action failed: {error:#}")),
                 }
                 app.fetching = None;
+            }
+        }
+
+        // Blocking writeups fetch for the `w` key. Runs with a `⟳ Loading
+        // writeups for <vm>...` label; opens the popup on success.
+        if let Some(vm) = app.pending_writeups.take() {
+            app.fetching = Some(format!("Loading writeups for {vm}..."));
+            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+            match run_writeups_fetch(&vm) {
+                Ok(entries) => {
+                    app.fetching = None;
+                    if entries.is_empty() {
+                        app.set_status(format!("No community writeups found for {vm}."));
+                    } else {
+                        app.writeups_popup = Some(WriteupsPopup {
+                            vm,
+                            entries,
+                            selected: 0,
+                        });
+                    }
+                }
+                Err(error) => {
+                    app.fetching = None;
+                    app.set_status(format!("Fetch failed: {error:#}"));
+                }
             }
         }
 
@@ -870,14 +966,32 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
         return;
     }
 
+    // Writeups popup captures everything until dismissed.
+    if app.writeups_popup.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.close_writeups_popup(),
+            KeyCode::Enter => app.open_selected_writeup_link(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(popup) = app.writeups_popup.as_mut() {
+                    popup.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(popup) = app.writeups_popup.as_mut() {
+                    popup.move_selection(1);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Result report popup captures everything until dismissed. Closing it
     // with `changed` set queues the deferred refresh (Opsi A).
     if app.report.is_some() {
         match key.code {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
-                if app.close_report() {
-                    app.refresh_requested = true;
-                }
+                app.refresh_requested |= app.close_report();
             }
             _ => {}
         }
@@ -948,6 +1062,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
             KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
             KeyCode::Char('d') => app.open_action_popup(PopupKind::Download),
+            KeyCode::Char('w') => app.open_writeups_popup(),
             KeyCode::Char('o') => app.toggle_downloads_view(),
             KeyCode::Char('c') if app.view == ViewMode::Downloads => {
                 // Cancel the most recent active download from the overlay.

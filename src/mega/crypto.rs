@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn value_of_large_chunk_scheme_sums_to_size() {
-        for size in [0x20000, 0x100000, 0x7fffF0, 5_000_000_000] {
+        for size in [0x20000, 0x100000, 0x7FFFF0, 5_000_000_000] {
             let chunks = get_chunks(size);
             let sum = chunks.iter().map(|(_, length)| length).sum::<u64>();
             assert_eq!(sum, size);
