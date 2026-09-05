@@ -329,8 +329,35 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
 }
 
 fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
+    // Read-only info box for already-PWNED machines: no fields, no submit.
+    if popup.readonly {
+        let box_area = popup_area(area, 56, 7);
+        frame.render_widget(Clear, box_area);
+        let lines = vec![
+            Line::from(Span::styled(
+                "User & root flags are in.",
+                Style::new().fg(Color::Green),
+            )),
+            Line::from(Span::styled(
+                "Resubmission is disabled.",
+                Style::new().dim(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("Enter / Esc close", Style::new().dim())),
+        ];
+        let block = Block::bordered()
+            .title(Span::styled(
+                format!(" ✓ Already PWNED — {} ", popup.vm),
+                Style::new().fg(Color::Green).bold(),
+            ))
+            .border_style(Style::new().fg(Color::Green));
+        frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        return;
+    }
+
     let fields = popup.buffers.len();
     let height = if fields > 1 { 10 } else { 7 };
+    let height = if popup.notice.is_some() { height + 1 } else { height };
     let box_area = popup_area(area, 74, height);
     frame.render_widget(Clear, box_area);
 
@@ -348,6 +375,13 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     };
 
     let mut lines = Vec::new();
+    if let Some(notice) = &popup.notice {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ {notice}"),
+            Style::new().fg(WARN).bold(),
+        )));
+        lines.push(Line::from(""));
+    }
     for (index, prompt) in prompts.iter().enumerate() {
         let active = index == popup.field;
         let marker = if active { "▏" } else { "" };

@@ -20,13 +20,18 @@ pub enum PopupKind {
 }
 
 /// A text-input popup bound to one machine. The Flag popup carries two
-/// fields (user & root); Upload has one.
+/// fields (user & root); Upload has one. Read-only popups (already-PWNED
+/// machines) render as an info box and cannot submit anything.
 #[derive(Debug, Clone)]
 pub struct Popup {
     pub kind: PopupKind,
     pub vm: String,
     pub buffers: Vec<String>,
     pub field: usize,
+    /// Yellow banner rendered above the fields (e.g. one flag already in).
+    pub notice: Option<String>,
+    /// Info-only popup: no fields, Enter/Esc just closes it.
+    pub readonly: bool,
 }
 
 impl Popup {
@@ -275,8 +280,18 @@ impl AppState {
         }
     }
 
+    /// The full machine under the selection (Machines tab only).
+    fn selected_machine(&self) -> Option<&Machine> {
+        if self.tab != Tab::Machines {
+            return None;
+        }
+        self.visible_machines().get(self.selected).copied()
+    }
+
     /// Opens the input popup for the given action. Actions are gated per
-    /// tab: flags belong on Machines, writeups on Pending.
+    /// tab: flags belong on Machines, writeups on Pending. Flag popups are
+    /// status-aware: PWNED machines get a read-only info box, DONE ones a
+    /// "one flag remains" notice.
     pub fn open_action_popup(&mut self, kind: PopupKind) {
         if self.popup.is_some() {
             return;
@@ -300,25 +315,62 @@ impl AppState {
             self.set_status("Nothing selected to act on.");
             return;
         };
-        let buffers = match kind {
-            PopupKind::Flag => vec![String::new(), String::new()],
-            PopupKind::Upload => vec![String::new()],
-        };
+
+        if kind == PopupKind::Flag {
+            let status = self
+                .selected_machine()
+                .map(|m| m.status.to_uppercase())
+                .unwrap_or_default();
+            if status.contains("PWNED") || status.contains("DONE") && status == "PWNED" {
+                // Fully completed machine: show an info box, no inputs.
+                self.popup = Some(Popup {
+                    kind,
+                    vm,
+                    buffers: Vec::new(),
+                    field: 0,
+                    notice: None,
+                    readonly: true,
+                });
+                return;
+            }
+            let notice = if status.contains("DONE") {
+                Some("One flag already submitted — one remains.".to_string())
+            } else {
+                None
+            };
+            self.popup = Some(Popup {
+                kind,
+                vm,
+                buffers: vec![String::new(), String::new()],
+                field: 0,
+                notice,
+                readonly: false,
+            });
+            return;
+        }
+
         self.popup = Some(Popup {
             kind,
             vm,
-            buffers,
+            buffers: vec![String::new()],
             field: 0,
+            notice: None,
+            readonly: false,
         });
     }
 
     /// Confirms the popup: queues the action and closes the popup.
     /// With two fields, non-empty entries are submitted together; a single
-    /// non-empty entry (or single-field popup) submits alone.
+    /// non-empty entry (or single-field popup) submits alone. Read-only
+    /// popups never queue anything.
     pub fn confirm_popup(&mut self) {
         let Some(popup) = self.popup.take() else {
             return;
         };
+        if popup.readonly {
+            self.set_status(format!("{} is already PWNED — nothing to submit.", popup.vm));
+            return;
+        }
         let values: Vec<String> = popup
             .buffers
             .iter()
@@ -549,6 +601,14 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
 
     // Popup input mode captures everything first.
     if app.popup.is_some() {
+        // Read-only popups (already-PWNED machines) just close.
+        if app.popup.as_ref().map(|p| p.readonly) == Some(true) {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.popup = None,
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 app.popup = None;
@@ -659,6 +719,14 @@ mod tests {
                     os: "linux".into(),
                     status: "TO HACK".into(),
                 },
+                Machine {
+                    name: "Arcane".into(),
+                    creator: "asya2ross".into(),
+                    size: "1.9 Gb".into(),
+                    difficulty: "intermediate".into(),
+                    os: "linux".into(),
+                    status: "DONE".into(),
+                },
             ],
         }
     }
@@ -755,7 +823,7 @@ mod tests {
         state.next_tab();
         state.next_tab();
         assert_eq!(state.tab, Tab::Machines);
-        assert_eq!(state.visible_machines().len(), 2);
+        assert_eq!(state.visible_machines().len(), 3);
 
         assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
         state.filter_push('n');
@@ -773,21 +841,84 @@ mod tests {
         state.next_tab();
         state.next_tab();
         assert_eq!(state.tab, Tab::Machines);
-        assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
+        // Select the TO HACK machine — writable popup.
+        state.move_down();
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Nebula1"));
 
         state.open_action_popup(PopupKind::Flag);
         let popup = state.popup.as_ref().unwrap();
         assert_eq!(popup.kind, PopupKind::Flag);
-        assert_eq!(popup.vm, "Fuxa");
+        assert_eq!(popup.vm, "Nebula1");
         assert_eq!(popup.buffers.len(), 2, "flag popup has user+root fields");
+        assert!(popup.notice.is_none(), "TO HACK machines have no notice");
 
         state.popup.as_mut().unwrap().buffers[0].push_str("flag{abc}");
         state.confirm_popup();
         assert!(state.popup.is_none());
         let action = state.pending_action.take().unwrap();
-        assert_eq!(action.vm, "Fuxa");
+        assert_eq!(action.vm, "Nebula1");
         assert_eq!(action.values, vec!["flag{abc}".to_string()]);
         assert_eq!(action.kind, PopupKind::Flag);
+    }
+
+    #[test]
+    fn flag_popup_reflects_machine_status() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab(); // Machines
+
+        // Fuxa (PWNED, row 0): read-only info popup.
+        state.open_action_popup(PopupKind::Flag);
+        let popup = state.popup.as_ref().unwrap();
+        assert!(popup.readonly);
+        assert!(popup.notice.is_none());
+        assert!(popup.buffers.is_empty());
+        state.popup = None;
+
+        // Nebula1 (TO HACK, row 1): plain writable popup.
+        state.move_down();
+        state.open_action_popup(PopupKind::Flag);
+        let popup = state.popup.as_ref().unwrap();
+        assert!(!popup.readonly);
+        assert!(popup.notice.is_none());
+        state.popup = None;
+
+        // Arcane (DONE, row 2): writable popup with the "one remains" notice.
+        state.move_down();
+        state.open_action_popup(PopupKind::Flag);
+        let popup = state.popup.as_ref().unwrap();
+        assert!(!popup.readonly);
+        assert_eq!(
+            popup.notice.as_deref(),
+            Some("One flag already submitted — one remains.")
+        );
+    }
+
+    #[test]
+    fn readonly_popup_cannot_submit() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab(); // Fuxa (PWNED) selected
+
+        state.open_action_popup(PopupKind::Flag);
+        assert!(state.popup.as_ref().unwrap().readonly);
+
+        // Typing is swallowed entirely.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.popup.as_ref().unwrap().buffers.len(), 0);
+
+        // Enter just closes it — no action is ever queued.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_none());
+        assert!(state.pending_action.is_none());
     }
 
     #[test]
@@ -796,6 +927,7 @@ mod tests {
         state.next_tab();
         state.next_tab();
         state.next_tab(); // Machines
+        state.move_down(); // Nebula1 (TO HACK)
 
         state.open_action_popup(PopupKind::Flag);
         // Fill the user flag, then hop to the root field (Tab) and fill it.
