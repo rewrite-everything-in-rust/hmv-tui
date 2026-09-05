@@ -259,9 +259,10 @@ fn filter_block(app: &AppState) -> Block<'_> {
             app.data.pending.len()
         ),
         Tab::Machines => format!(
-            " Machines {}/{} ",
+            " Machines {}/{}{} ",
             app.visible_machines().len(),
-            app.data.catalog.len()
+            app.data.catalog.len(),
+            app.machine_sort.indicator()
         ),
         Tab::Releases => format!(
             " Releases {}/{} ",
@@ -766,7 +767,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
                     Tab::Stats => String::new(),
                     Tab::Writeups => "jk move · / filter · Enter open · ".to_string(),
                     Tab::Pending => "jk move · / filter · u writeup · ".to_string(),
-                    Tab::Machines => "jk move · / filter · f flag · d download · ".to_string(),
+                    Tab::Machines => "jk move · / filter · s size sort · f flag · d download · ".to_string(),
                     Tab::Releases => "jk move · / filter · ".to_string(),
                 };
                 let common = "a account · r refresh · q quit";

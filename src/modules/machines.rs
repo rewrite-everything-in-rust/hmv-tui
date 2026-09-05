@@ -26,6 +26,19 @@ fn color_map() -> HashMap<&'static str, &'static str> {
     ])
 }
 
+/// Parses a human size like "1.9 Gb" or "450 Mb" into megabytes so machines
+/// can be sorted by real size (the site mixes Gb/Mb labels). Unknown shapes
+/// sort as 0.
+pub fn size_mb(size: &str) -> f64 {
+    let mut tokens = size.split_whitespace();
+    let number: f64 = tokens.next().and_then(|n| n.parse().ok()).unwrap_or(0.0);
+    match tokens.next().unwrap_or("").to_lowercase().as_str() {
+        unit if unit.starts_with('g') => number * 1024.0,
+        unit if unit.starts_with('m') => number,
+        _ => number,
+    }
+}
+
 pub struct MachineScraper {
     session: HmvSession,
     colors: HashMap<&'static str, &'static str>,
@@ -152,5 +165,20 @@ pub fn parse_machines(html: &str, page: usize, colors: &HashMap<&'static str, &'
     Page {
         machines,
         pages_info,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sizes_into_megabytes() {
+        assert_eq!(size_mb("2 Gb"), 2048.0);
+        assert_eq!(size_mb("450 Mb"), 450.0);
+        assert_eq!(size_mb("700 MB"), 700.0); // unit is case-insensitive
+        assert_eq!(size_mb("1.5 gb"), 1536.0);
+        assert_eq!(size_mb("garbage"), 0.0);
+        assert_eq!(size_mb(""), 0.0);
     }
 }

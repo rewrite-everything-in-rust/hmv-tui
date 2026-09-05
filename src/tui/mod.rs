@@ -207,6 +207,35 @@ pub enum InputMode {
     Filter,
 }
 
+/// Sort order for the Machines tab (`s` cycles: site order -> smallest ->
+/// largest -> back to site order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MachineSort {
+    #[default]
+    Default,
+    SizeAsc,
+    SizeDesc,
+}
+
+impl MachineSort {
+    fn next(self) -> Self {
+        match self {
+            MachineSort::Default => MachineSort::SizeAsc,
+            MachineSort::SizeAsc => MachineSort::SizeDesc,
+            MachineSort::SizeDesc => MachineSort::Default,
+        }
+    }
+
+    /// Suffix shown in the Machines tab title, e.g. " · size ↑".
+    pub fn indicator(self) -> &'static str {
+        match self {
+            MachineSort::Default => "",
+            MachineSort::SizeAsc => " · size ↑",
+            MachineSort::SizeDesc => " · size ↓",
+        }
+    }
+}
+
 /// Overlay listing background download jobs (`o` toggles it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -230,6 +259,8 @@ pub struct AppState {
     pub quit_warned: bool,
     pub filter: String,
     pub selected: usize,
+    /// Sort order of the Machines tab (cycled with `s`).
+    pub machine_sort: MachineSort,
     /// First visible row for the active list (manual scrolling window).
     pub scroll: usize,
     pub quit: bool,
@@ -274,6 +305,7 @@ impl AppState {
             quit_warned: false,
             filter: String::new(),
             selected: 0,
+            machine_sort: MachineSort::default(),
             scroll: 0,
             quit: false,
             refresh_requested: false,
@@ -429,10 +461,12 @@ impl AppState {
     }
 
     /// Lowercase-filtered machine catalog for the Machines tab. Filter
-    /// matches name, difficulty, creator or status.
+    /// matches name, difficulty, creator or status; `machine_sort` orders
+    /// the result by size (smallest/largest) or keeps the site order.
     pub fn visible_machines(&self) -> Vec<&Machine> {
         let needle = self.filter.to_lowercase();
-        self.data
+        let mut machines: Vec<&Machine> = self
+            .data
             .catalog
             .iter()
             .filter(|m| {
@@ -442,7 +476,32 @@ impl AppState {
                     || m.creator.to_lowercase().contains(&needle)
                     || m.status.to_lowercase().contains(&needle)
             })
-            .collect()
+            .collect();
+        match self.machine_sort {
+            MachineSort::Default => {}
+            MachineSort::SizeAsc => machines.sort_by(|a, b| {
+                crate::modules::machines::size_mb(&a.size)
+                    .partial_cmp(&crate::modules::machines::size_mb(&b.size))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            MachineSort::SizeDesc => machines.sort_by(|a, b| {
+                crate::modules::machines::size_mb(&b.size)
+                    .partial_cmp(&crate::modules::machines::size_mb(&a.size))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+        }
+        machines
+    }
+
+    /// Cycles the Machines-tab size sort: site order -> smallest -> largest.
+    /// Gated to the Machines tab like the other actions.
+    pub fn cycle_machine_sort(&mut self) {
+        if self.tab != Tab::Machines {
+            self.set_status("Size sort is only available on the Machines tab.");
+            return;
+        }
+        self.machine_sort = self.machine_sort.next();
+        self.reset_list_position();
     }
 
     /// Filtered release schedule for the Releases tab (date, name, os).
@@ -1264,6 +1323,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Home | KeyCode::Char('g') => app.move_start(),
             KeyCode::Char('/') => app.enter_filter_mode(),
             KeyCode::Char('a') => app.open_account_popup(),
+            KeyCode::Char('s') => app.cycle_machine_sort(),
             KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
             KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
             KeyCode::Char('d') => app.open_action_popup(PopupKind::Download),
@@ -1343,7 +1403,7 @@ mod tests {
                 Machine {
                     name: "Arcane".into(),
                     creator: "asya2ross".into(),
-                    size: "1.9 Gb".into(),
+                    size: "0.8 Gb".into(),
                     difficulty: "intermediate".into(),
                     os: "linux".into(),
                     status: "DONE".into(),
@@ -1910,6 +1970,51 @@ mod tests {
         );
         assert!(state.quit);
         assert!(state.popup.is_none());
+    }
+
+    #[test]
+    fn machines_size_sort_cycles() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab(); // Machines
+        assert_eq!(state.machine_sort, MachineSort::Default);
+        fn names(state: &AppState) -> Vec<&str> {
+            state.visible_machines().iter().map(|m| m.name.as_str()).collect()
+        }
+        // Site order: Fuxa (0.5 Gb), Nebula1 (1.3 Gb), Arcane (0.8 Gb).
+        assert_eq!(names(&state), ["Fuxa", "Nebula1", "Arcane"]);
+
+        // s -> smallest first.
+        state.cycle_machine_sort();
+        assert_eq!(state.machine_sort, MachineSort::SizeAsc);
+        assert_eq!(names(&state), ["Fuxa", "Arcane", "Nebula1"]);
+
+        // s -> largest first.
+        state.cycle_machine_sort();
+        assert_eq!(state.machine_sort, MachineSort::SizeDesc);
+        assert_eq!(names(&state), ["Nebula1", "Arcane", "Fuxa"]);
+
+        // s -> back to site order.
+        state.cycle_machine_sort();
+        assert_eq!(state.machine_sort, MachineSort::Default);
+        assert_eq!(names(&state), ["Fuxa", "Nebula1", "Arcane"]);
+
+        // Sorting composes with the filter.
+        state.cycle_machine_sort(); // size ↑
+        for character in ['n', 'e', 'b'] {
+            state.filter_push(character);
+        }
+        assert_eq!(names(&state), ["Nebula1"]);
+    }
+
+    #[test]
+    fn size_sort_is_gated_to_machines_tab() {
+        let mut state = app();
+        assert_eq!(state.tab, Tab::Stats);
+        state.cycle_machine_sort();
+        assert_eq!(state.machine_sort, MachineSort::Default);
+        assert!(state.status.is_some());
     }
 
     #[test]
