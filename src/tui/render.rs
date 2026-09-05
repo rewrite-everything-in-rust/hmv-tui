@@ -329,23 +329,44 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
 }
 
 fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
-    let box_area = popup_area(area, 74, 7);
+    let fields = popup.buffers.len();
+    let height = if fields > 1 { 10 } else { 7 };
+    let box_area = popup_area(area, 74, height);
     frame.render_widget(Clear, box_area);
 
-    let (title, prompt) = match popup.kind {
-        PopupKind::Flag => (format!(" Submit flag — {} ", popup.vm), "Flag token:"),
-        PopupKind::Upload => (format!(" Submit writeup — {} ", popup.vm), "Writeup URL:"),
+    let (title, prompts, hint): (String, Vec<&str>, &str) = match popup.kind {
+        PopupKind::Flag => (
+            format!(" Submit flags — {} ", popup.vm),
+            vec!["User flag:", "Root flag:"],
+            "Enter send both · ↑↓/Tab switch field · Esc cancel",
+        ),
+        PopupKind::Upload => (
+            format!(" Submit writeup — {} ", popup.vm),
+            vec!["Writeup URL:"],
+            "Enter send · Esc cancel",
+        ),
     };
 
-    let lines = vec![
-        Line::from(Span::styled(prompt, Style::new().fg(ACCENT).bold())),
-        Line::from(Span::styled(
-            format!(" {}▏", popup.buffer),
-            Style::new().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(Span::styled("Enter send · Esc cancel", Style::new().dim())),
-    ];
+    let mut lines = Vec::new();
+    for (index, prompt) in prompts.iter().enumerate() {
+        let active = index == popup.field;
+        let marker = if active { "▏" } else { "" };
+        let buffer = popup.buffers.get(index).map(String::as_str).unwrap_or("");
+        let style = if active {
+            Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().dim()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{prompt} {buffer}{marker}"),
+            style,
+        )));
+        if index + 1 < prompts.len() {
+            lines.push(Line::from(""));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(hint, Style::new().dim())));
 
     let block = Block::bordered()
         .title(Span::styled(title, Style::new().fg(WARN).bold()))
@@ -370,13 +391,24 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     ])
     .areas(area);
 
-    let keys = if app.popup.is_some() {
-        "Enter send · Esc cancel"
+    let keys: String = if app.popup.is_some() {
+        "Enter send · ↑↓/Tab switch field · Esc cancel".to_string()
     } else {
         match app.input_mode {
-            InputMode::Filter => "Enter confirm · Esc clear & exit filter",
+            InputMode::Filter => "Enter confirm · Esc clear & exit filter".to_string(),
             InputMode::Normal => {
-                "Tab tabs · ↑↓/jk move · / filter · f flag · u writeup · Enter open · r refresh · q quit"
+                let list_keys = match app.tab {
+                    Tab::Stats => String::new(),
+                    Tab::Writeups => "↑↓/jk move · / filter · Enter open · ".to_string(),
+                    Tab::Pending => "↑↓/jk move · / filter · u writeup · ".to_string(),
+                    Tab::Machines => "↑↓/jk move · / filter · f flag (user+root) · ".to_string(),
+                };
+                let common = "r refresh · q quit";
+                if list_keys.is_empty() {
+                    format!("Tab tabs · {common}")
+                } else {
+                    format!("Tab tabs · {list_keys}{common}")
+                }
             }
         }
     };

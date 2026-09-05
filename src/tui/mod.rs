@@ -19,20 +19,50 @@ pub enum PopupKind {
     Upload,
 }
 
-/// A text-input popup bound to one machine.
+/// A text-input popup bound to one machine. The Flag popup carries two
+/// fields (user & root); Upload has one.
 #[derive(Debug, Clone)]
 pub struct Popup {
     pub kind: PopupKind,
     pub vm: String,
-    pub buffer: String,
+    pub buffers: Vec<String>,
+    pub field: usize,
+}
+
+impl Popup {
+    pub fn push(&mut self, c: char) {
+        if let Some(buffer) = self.buffers.get_mut(self.field) {
+            buffer.push(c);
+        }
+    }
+
+    pub fn pop(&mut self) {
+        if let Some(buffer) = self.buffers.get_mut(self.field) {
+            buffer.pop();
+        }
+    }
+
+    pub fn next_field(&mut self) {
+        if self.buffers.len() > 1 {
+            self.field = (self.field + 1) % self.buffers.len();
+        }
+    }
+
+    pub fn previous_field(&mut self) {
+        if self.buffers.len() > 1 {
+            self.field = (self.field + self.buffers.len() - 1) % self.buffers.len();
+        }
+    }
 }
 
 /// A user action queued from a popup, executed by the host application.
+/// `values` holds one flag (single) or two (user & root, submitted in
+/// parallel); uploads always carry exactly one URL.
 #[derive(Debug, Clone)]
 pub struct TuiAction {
     pub kind: PopupKind,
     pub vm: String,
-    pub value: String,
+    pub values: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,41 +275,78 @@ impl AppState {
         }
     }
 
-    /// Opens the input popup for the given action on the selected machine.
+    /// Opens the input popup for the given action. Actions are gated per
+    /// tab: flags belong on Machines, writeups on Pending.
     pub fn open_action_popup(&mut self, kind: PopupKind) {
         if self.popup.is_some() {
             return;
         }
-        if let Some(vm) = self.selected_machine_name() {
-            self.popup = Some(Popup {
-                kind,
-                vm,
-                buffer: String::new(),
+        let allowed = match kind {
+            PopupKind::Flag => self.tab == Tab::Machines,
+            PopupKind::Upload => self.tab == Tab::Pending,
+        };
+        if !allowed {
+            self.set_status(match kind {
+                PopupKind::Flag => {
+                    "Flag submission is only available on the Machines tab."
+                }
+                PopupKind::Upload => {
+                    "Writeup submission is only available on the Pending tab."
+                }
             });
-        } else {
-            self.set_status("Nothing selected to act on.");
+            return;
         }
+        let Some(vm) = self.selected_machine_name() else {
+            self.set_status("Nothing selected to act on.");
+            return;
+        };
+        let buffers = match kind {
+            PopupKind::Flag => vec![String::new(), String::new()],
+            PopupKind::Upload => vec![String::new()],
+        };
+        self.popup = Some(Popup {
+            kind,
+            vm,
+            buffers,
+            field: 0,
+        });
     }
 
     /// Confirms the popup: queues the action and closes the popup.
+    /// With two fields, non-empty entries are submitted together; a single
+    /// non-empty entry (or single-field popup) submits alone.
     pub fn confirm_popup(&mut self) {
-        if let Some(popup) = self.popup.take() {
-            let value = popup.buffer.trim().to_string();
-            if value.is_empty() {
-                self.set_status("Cancelled — empty input.");
-                return;
-            }
-            let kind_label = match popup.kind {
-                PopupKind::Flag => "flag",
-                PopupKind::Upload => "writeup URL",
-            };
-            self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
-            self.pending_action = Some(TuiAction {
-                kind: popup.kind,
-                vm: popup.vm,
-                value,
-            });
+        let Some(popup) = self.popup.take() else {
+            return;
+        };
+        let values: Vec<String> = popup
+            .buffers
+            .iter()
+            .map(|b| b.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+
+        if values.is_empty() {
+            self.set_status("Cancelled — empty input.");
+            return;
         }
+
+        let kind_label = match popup.kind {
+            PopupKind::Flag => {
+                if values.len() > 1 {
+                    "flags"
+                } else {
+                    "flag"
+                }
+            }
+            PopupKind::Upload => "writeup URL",
+        };
+        self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
+        self.pending_action = Some(TuiAction {
+            kind: popup.kind,
+            vm: popup.vm,
+            values,
+        });
     }
 
     fn row_count(&self) -> usize {
@@ -490,12 +557,22 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Enter => app.confirm_popup(),
             KeyCode::Backspace => {
                 if let Some(popup) = app.popup.as_mut() {
-                    popup.buffer.pop();
+                    popup.pop();
+                }
+            }
+            KeyCode::Up => {
+                if let Some(popup) = app.popup.as_mut() {
+                    popup.previous_field();
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                if let Some(popup) = app.popup.as_mut() {
+                    popup.next_field();
                 }
             }
             KeyCode::Char(c) => {
                 if let Some(popup) = app.popup.as_mut() {
-                    popup.buffer.push(c);
+                    popup.push(c);
                 }
             }
             _ => {}
@@ -534,6 +611,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEvent;
 
     fn sample_data() -> TuiData {
         use crate::modules::stats::ProfileWriteup;
@@ -690,23 +768,98 @@ mod tests {
     #[test]
     fn popup_flow_queues_action() {
         let mut state = app();
+        // Flags are gated to the Machines tab.
         state.next_tab();
-        state.next_tab(); // Pending tab — machine-centric
-        assert_eq!(state.tab, Tab::Pending);
+        state.next_tab();
+        state.next_tab();
+        assert_eq!(state.tab, Tab::Machines);
         assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
 
         state.open_action_popup(PopupKind::Flag);
         let popup = state.popup.as_ref().unwrap();
         assert_eq!(popup.kind, PopupKind::Flag);
         assert_eq!(popup.vm, "Fuxa");
+        assert_eq!(popup.buffers.len(), 2, "flag popup has user+root fields");
 
-        state.popup.as_mut().unwrap().buffer.push_str("flag{abc}");
+        state.popup.as_mut().unwrap().buffers[0].push_str("flag{abc}");
         state.confirm_popup();
         assert!(state.popup.is_none());
         let action = state.pending_action.take().unwrap();
         assert_eq!(action.vm, "Fuxa");
-        assert_eq!(action.value, "flag{abc}");
+        assert_eq!(action.values, vec!["flag{abc}".to_string()]);
         assert_eq!(action.kind, PopupKind::Flag);
+    }
+
+    #[test]
+    fn dual_flag_popup_queues_both_values() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab(); // Machines
+
+        state.open_action_popup(PopupKind::Flag);
+        // Fill the user flag, then hop to the root field (Tab) and fill it.
+        state
+            .popup
+            .as_mut()
+            .unwrap()
+            .buffers[0]
+            .push_str("flag{user}");
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        assert_eq!(state.popup.as_ref().unwrap().field, 1);
+        state
+            .popup
+            .as_mut()
+            .unwrap()
+            .buffers[1]
+            .push_str("flag{root}");
+        state.confirm_popup();
+
+        let action = state.pending_action.take().unwrap();
+        assert_eq!(
+            action.values,
+            vec!["flag{user}".to_string(), "flag{root}".to_string()]
+        );
+    }
+
+    #[test]
+    fn action_keys_are_tab_gated() {
+        // 'f' on Pending -> blocked; 'u' on Pending -> allowed.
+        let mut state = app();
+        state.next_tab();
+        state.next_tab(); // Pending
+        state.popup = None;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_none(), "flag popup must be blocked on Pending");
+        assert!(state.status.is_some());
+
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_some(), "upload popup allowed on Pending");
+        state.popup = None;
+
+        // 'u' on Machines -> blocked; 'f' on Machines -> allowed.
+        state.next_tab(); // Machines
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_none(), "upload popup must be blocked on Machines");
+        assert!(state.status.is_some());
+
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_some(), "flag popup allowed on Machines");
     }
 
     #[test]
@@ -714,16 +867,16 @@ mod tests {
         let mut state = app();
         state.next_tab();
         state.next_tab();
-        state.next_tab();
-        state.open_action_popup(PopupKind::Upload);
-        state.confirm_popup(); // empty buffer -> cancelled, no action
+        state.next_tab(); // Machines
+        state.open_action_popup(PopupKind::Flag);
+        state.confirm_popup(); // empty buffers -> cancelled, no action
         assert!(state.popup.is_none());
         assert!(state.pending_action.is_none());
 
-        state.open_action_popup(PopupKind::Upload);
+        state.open_action_popup(PopupKind::Flag);
         assert!(state.popup.is_some());
         state.open_action_popup(PopupKind::Flag); // ignored while open
-        assert_eq!(state.popup.as_ref().unwrap().kind, PopupKind::Upload);
+        assert_eq!(state.popup.as_ref().unwrap().kind, PopupKind::Flag);
     }
 
     #[test]

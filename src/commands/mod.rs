@@ -58,30 +58,58 @@ pub async fn tui_cmd() -> Result<()> {
 }
 
 /// Executes a user action from a TUI popup. Returns the footer message and
-/// whether dashboard data should be re-fetched.
+/// whether dashboard data should be re-fetched. Flag actions carry one or
+/// two values (user & root); they are submitted in parallel and the verdicts
+/// are labeled by position — the API does not expose the flag level.
 async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<(String, bool)> {
     match action.kind {
         crate::tui::PopupKind::Flag => {
-            let verdict = FlagManager::new(sessions.session())
-                .check(&action.vm, &action.value)
-                .await?;
-            let (message, changed) = match verdict {
-                crate::modules::flag::FlagVerdict::Correct => {
-                    (format!("[✓] You hacked {}!", action.vm), true)
+            use crate::modules::flag::FlagVerdict;
+
+            if action.values.len() > 2 {
+                anyhow::bail!("A maximum of 2 flags (user & root) can be submitted.");
+            }
+
+            let vm = action.vm.clone();
+            let vm_ref = vm.as_str();
+            let sessions_ref: &SessionCache = sessions;
+            let futures = action.values.iter().map(|flag| {
+                let flag = flag.clone();
+                let vm = vm_ref;
+                async move {
+                    FlagManager::new(sessions_ref.session())
+                        .check(vm, &flag)
+                        .await
                 }
-                crate::modules::flag::FlagVerdict::Wrong => ("[!] Wrong flag — try harder!".into(), false),
-                crate::modules::flag::FlagVerdict::MachineNotFound => {
-                    (format!("[!] Machine '{}' not found.", action.vm), false)
-                }
-                crate::modules::flag::FlagVerdict::Unknown(body) => {
-                    (format!("[?] Unknown response: {body}"), false)
-                }
-            };
-            Ok((message, changed))
+            });
+            let results = futures_util::future::join_all(futures).await;
+
+            let mut changed = false;
+            let mut parts = Vec::new();
+            for (index, result) in results.into_iter().enumerate() {
+                let label = format!("Flag {}", index + 1);
+                let text = match result? {
+                    FlagVerdict::Correct => {
+                        changed = true;
+                        format!("{label}: [✓] accepted")
+                    }
+                    FlagVerdict::Wrong => format!("{label}: [!] rejected"),
+                    FlagVerdict::MachineNotFound => {
+                        format!("{label}: machine '{}' not found", action.vm)
+                    }
+                    FlagVerdict::Unknown(body) => format!("{label}: unknown response — {body}"),
+                };
+                parts.push(text);
+            }
+
+            if parts.len() == 1 && changed {
+                return Ok((format!("[✓] You hacked {}!", action.vm), changed));
+            }
+            Ok((parts.join(" · "), changed))
         }
         crate::tui::PopupKind::Upload => {
             let verdict = WriteupManager::new(sessions.session())
-                .submit(&action.vm, &action.value)
+                .submit(&action.vm, &action.values[0])
                 .await?;
             let message = match verdict {
                 crate::modules::writeups::UploadVerdict::Submitted => {
