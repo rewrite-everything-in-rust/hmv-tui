@@ -25,8 +25,20 @@ pub enum PopupKind {
     Flag,
     Upload,
     Download,
-    /// First-run credentials popup (`hmv` without a stored account).
+    /// Credentials popup (first run, stale password, account switch).
     Config,
+    /// Account overview popup (`a`): shows the active account with actions
+    /// to switch (`Enter`) or logout (`l`).
+    Account,
+}
+
+/// Why the credentials popup was opened — drives its yellow notice line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigContext {
+    FirstRun,
+    LoginFailed,
+    Switch,
+    LoggedOut,
 }
 
 /// A text-input popup bound to one machine. The Flag popup carries two
@@ -210,6 +222,8 @@ pub struct AppState {
     /// True while no usable session exists (first run or stale password);
     /// the config popup is then the only way forward.
     pub needs_config: bool,
+    /// Set by the account popup (`l`); consumed by the event loop.
+    pub pending_logout: bool,
     /// Background download jobs (newest last). Shared with the renderer.
     pub download_jobs: Vec<std::sync::Arc<downloads::DownloadJob>>,
     /// First `q` with active downloads only sets this; second quits.
@@ -255,6 +269,7 @@ impl AppState {
             input_mode: InputMode::Normal,
             view: ViewMode::Normal,
             needs_config: false,
+            pending_logout: false,
             download_jobs: Vec::new(),
             quit_warned: false,
             filter: String::new(),
@@ -289,7 +304,12 @@ impl AppState {
     pub fn unconfigured(stored_username: Option<&str>) -> Self {
         let mut state = Self::new(TuiData::empty());
         state.needs_config = true;
-        state.open_config_popup(stored_username);
+        let context = if stored_username.is_some() {
+            ConfigContext::LoginFailed
+        } else {
+            ConfigContext::FirstRun
+        };
+        state.open_config_popup(context, stored_username);
         state
     }
 
@@ -485,7 +505,7 @@ impl AppState {
         let allowed = match kind {
             PopupKind::Flag | PopupKind::Download => self.tab == Tab::Machines,
             PopupKind::Upload => self.tab == Tab::Pending,
-            PopupKind::Config => false, // managed by the startup path / event loop
+            PopupKind::Config | PopupKind::Account => false, // managed elsewhere
         };
         if !allowed {
             self.set_status(match kind {
@@ -498,7 +518,7 @@ impl AppState {
                 PopupKind::Download => {
                     "Downloads are only available on the Machines tab."
                 }
-                PopupKind::Config => return, // never opened ad hoc
+                PopupKind::Config | PopupKind::Account => return, // never opened ad hoc
             });
             return;
         }
@@ -566,24 +586,57 @@ impl AppState {
         });
     }
 
-    /// Opens the credentials popup used on first run (or after a failed
-    /// login). Prefills the username when one is stored on disk.
-    pub fn open_config_popup(&mut self, stored_username: Option<&str>) {
+    /// Opens the credentials popup for the given reason, optionally
+    /// prefilled with a username.
+    pub fn open_config_popup(&mut self, context: ConfigContext, username: Option<&str>) {
         if self.popup.is_some() {
             return;
         }
-        let notice = match stored_username {
-            Some(_) => "Login failed — re-enter your HackMyVM credentials.",
-            None => "First run — enter your HackMyVM account.",
+        let notice = match context {
+            ConfigContext::FirstRun => "First run — enter your HackMyVM account.",
+            ConfigContext::LoginFailed => "Login failed — re-enter your HackMyVM credentials.",
+            ConfigContext::Switch => "Switch account — enter the new credentials.",
+            ConfigContext::LoggedOut => "Logged out — sign in with your HackMyVM account.",
         };
         self.popup = Some(Popup {
             kind: PopupKind::Config,
             vm: String::new(),
-            buffers: vec![stored_username.unwrap_or_default().to_string(), String::new()],
+            buffers: vec![username.unwrap_or_default().to_string(), String::new()],
             field: 0,
             notice: Some(notice.to_string()),
             readonly: false,
         });
+    }
+
+    /// Opens the account popup for the active session (`a`): shows the
+    /// logged-in account with actions to switch (`Enter`) or logout (`l`).
+    /// The username rides in `Popup::vm` for the renderer.
+    pub fn open_account_popup(&mut self) {
+        if self.needs_config
+            || self.popup.is_some()
+            || self.report.is_some()
+            || self.writeups_popup.is_some()
+        {
+            return;
+        }
+        self.popup = Some(Popup {
+            kind: PopupKind::Account,
+            vm: self.data.stats.username.clone(),
+            buffers: Vec::new(),
+            field: 0,
+            notice: None,
+            readonly: true,
+        });
+    }
+
+    /// Enter on the account popup: close it and open the login popup
+    /// prefilled with the current username for an account switch. The
+    /// dashboard keeps showing the current account until the switch
+    /// succeeds (a failure just reopens the login popup).
+    pub fn begin_account_switch(&mut self) {
+        let username = self.data.stats.username.clone();
+        self.popup = None;
+        self.open_config_popup(ConfigContext::Switch, Some(&username));
     }
 
     /// Queues a writeups fetch for the selected machine; the event loop
@@ -700,6 +753,7 @@ impl AppState {
             PopupKind::Upload => "writeup URL",
             PopupKind::Download => "download",
             PopupKind::Config => "credentials", // handled above
+            PopupKind::Account => "account",    // handled above
         };
         self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
         self.pending_action = Some(TuiAction {
@@ -867,38 +921,47 @@ pub fn build_flag_report(vm: &str, results: Vec<(usize, FlagVerdict)>) -> Action
 /// demand; `run_action` executes a user action (flag/upload) and returns an
 /// `ActionReport` for the result popup; `run_writeups_fetch` fetches the
 /// community writeups for a machine (blocking, network-only);
-/// `run_config` validates and stores first-run credentials.
+/// `run_config` validates and stores credentials; `logout` removes them.
 pub fn run(
     mut app: AppState,
     refetch: impl Fn() -> Result<TuiData>,
     run_action: impl Fn(TuiAction) -> Result<ActionReport>,
     run_writeups_fetch: impl Fn(&str) -> Result<Vec<Writeup>>,
     run_config: impl Fn(&str, &str) -> Result<()>,
+    logout: impl Fn() -> Result<()>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     // Kick off the first load (and any pending request) before looping.
     let mut pending_fetch = app.fetching.is_some();
-    let result = event_loop(
-        &mut terminal,
-        &mut app,
-        &refetch,
-        &run_action,
-        &run_writeups_fetch,
-        &run_config,
-        &mut pending_fetch,
-    );
+    let mut host = Host {
+        refetch: &refetch,
+        run_action: &run_action,
+        run_writeups_fetch: &run_writeups_fetch,
+        run_config: &run_config,
+        logout: &logout,
+        pending_fetch: &mut pending_fetch,
+    };
+    let result = event_loop(&mut terminal, &mut app, &mut host);
     ratatui::restore();
     result
+}
+
+/// Host-provided callbacks the event loop calls synchronously (blocking the
+/// render thread for the duration of the network call).
+struct Host<'a> {
+    refetch: &'a dyn Fn() -> Result<TuiData>,
+    run_action: &'a dyn Fn(TuiAction) -> Result<ActionReport>,
+    run_writeups_fetch: &'a dyn Fn(&str) -> Result<Vec<Writeup>>,
+    run_config: &'a dyn Fn(&str, &str) -> Result<()>,
+    logout: &'a dyn Fn() -> Result<()>,
+    /// Set when the next loop iteration must (re)fetch all data.
+    pending_fetch: &'a mut bool,
 }
 
 fn event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
-    refetch: &dyn Fn() -> Result<TuiData>,
-    run_action: &dyn Fn(TuiAction) -> Result<ActionReport>,
-    run_writeups_fetch: &dyn Fn(&str) -> Result<Vec<Writeup>>,
-    run_config: &dyn Fn(&str, &str) -> Result<()>,
-    pending_fetch: &mut bool,
+    host: &mut Host<'_>,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
@@ -912,6 +975,33 @@ fn event_loop(
         }
 
         app.tick();
+
+        // Logout from the account popup (`l`): drop the stored account and
+        // the session, then return to the login popup. Active downloads
+        // keep running — they use public MEGA links, not the session.
+        if app.pending_logout {
+            app.pending_logout = false;
+            app.fetching = Some("Logging out...".to_string());
+            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+            match (host.logout)() {
+                Ok(()) => {
+                    app.fetching = None;
+                    app.needs_config = true;
+                    app.tab = Tab::Stats;
+                    app.input_mode = InputMode::Normal;
+                    app.view = ViewMode::Normal;
+                    app.filter.clear();
+                    app.set_data(TuiData::empty());
+                    app.open_config_popup(ConfigContext::LoggedOut, None);
+                    app.set_status("[✓] Logged out — enter another account or Esc to quit.");
+                }
+                Err(error) => {
+                    app.fetching = None;
+                    app.set_status(format!("Logout failed: {error:#}"));
+                }
+            }
+        }
 
         // User actions from popups (config, flag submission, writeup upload,
         // download start).
@@ -941,20 +1031,21 @@ fn event_loop(
                     app.fetching = Some(format!("Connecting as {username}..."));
                     terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
-                    match run_config(&username, &password) {
+                    match (host.run_config)(&username, &password) {
                         Ok(()) => {
                             app.fetching = None;
                             app.needs_config = false;
                             app.set_status(format!("[✓] Connected as {username} — loading data..."));
-                            *pending_fetch = true;
+                            *host.pending_fetch = true;
                         }
                         Err(error) => {
                             app.fetching = None;
                             app.set_status(format!("Configuration failed: {error:#}"));
-                            app.open_config_popup(Some(&username));
+                            app.open_config_popup(ConfigContext::LoginFailed, Some(&username));
                         }
                     }
                 }
+                PopupKind::Account => unreachable!("no action is queued from the account popup"),
                 PopupKind::Flag | PopupKind::Upload => {
                     let label = match action.kind {
                         PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
@@ -964,7 +1055,7 @@ fn event_loop(
                     app.fetching = Some(label);
                     terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
-                    match run_action(action) {
+                    match (host.run_action)(action) {
                         Ok(report) => {
                             // Footer shows a 5s summary; the popup persists.
                             app.set_status(report.status.clone());
@@ -984,7 +1075,7 @@ fn event_loop(
             app.fetching = Some(format!("Loading writeups for {vm}..."));
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
-            match run_writeups_fetch(&vm) {
+            match (host.run_writeups_fetch)(&vm) {
                 Ok(entries) => {
                     app.fetching = None;
                     if entries.is_empty() {
@@ -1021,15 +1112,15 @@ fn event_loop(
             }
         }
 
-        if app.should_fetch(*pending_fetch) {
-            *pending_fetch = false;
+        if app.should_fetch(*host.pending_fetch) {
+            *host.pending_fetch = false;
             app.refresh_requested = false;
             app.fetching = Some("Refreshing data...".to_string());
             // Draw immediately so the `⟳ <label>` shows while the blocking
             // fetch runs, instead of freezing silently.
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
 
-            let result = refetch();
+            let result = (host.refetch)();
             app.fetching = None;
             match result {
                 Ok(data) => {
@@ -1056,6 +1147,20 @@ fn event_loop(
 fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.request_quit();
+        return;
+    }
+
+    // Account popup captures everything until dismissed.
+    if app.popup.as_ref().map(|p| p.kind) == Some(PopupKind::Account) {
+        match key.code {
+            KeyCode::Enter => app.begin_account_switch(),
+            KeyCode::Char('l') => {
+                app.popup = None;
+                app.pending_logout = true;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => app.popup = None,
+            _ => {}
+        }
         return;
     }
 
@@ -1158,6 +1263,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Up | KeyCode::Char('k') => app.move_up(),
             KeyCode::Home | KeyCode::Char('g') => app.move_start(),
             KeyCode::Char('/') => app.enter_filter_mode(),
+            KeyCode::Char('a') => app.open_account_popup(),
             KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
             KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
             KeyCode::Char('d') => app.open_action_popup(PopupKind::Download),
@@ -1191,6 +1297,7 @@ mod tests {
         use crate::modules::stats::ProfileWriteup;
         TuiData {
             stats: ProfileStats {
+                username: "demouser".into(),
                 accepted_writeups: vec![
                     ProfileWriteup {
                         vm: "Economists".into(),
@@ -1803,6 +1910,63 @@ mod tests {
         );
         assert!(state.quit);
         assert!(state.popup.is_none());
+    }
+
+    #[test]
+    fn account_popup_flow() {
+        let mut state = app();
+
+        // 'a' opens the account popup carrying the active username.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Account);
+        assert_eq!(popup.vm, "demouser");
+
+        // Esc closes without side effects.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert!(state.popup.is_none());
+        assert!(!state.pending_logout);
+
+        // l queues a logout.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()),
+        );
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+        );
+        assert!(state.pending_logout);
+        assert!(state.popup.is_none());
+
+        // Enter opens the switch popup prefilled with the current account.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()),
+        );
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Config);
+        assert_eq!(popup.buffers[0], "demouser");
+        assert!(state.pending_action.is_none());
+    }
+
+    #[test]
+    fn account_popup_is_gated_while_unconfigured() {
+        let mut state = AppState::unconfigured(None);
+        state.open_account_popup();
+        // The config popup stays the modal: no account popup may replace it.
+        assert_eq!(state.popup.as_ref().unwrap().kind, PopupKind::Config);
+        assert!(!state.pending_logout);
     }
 
     #[test]

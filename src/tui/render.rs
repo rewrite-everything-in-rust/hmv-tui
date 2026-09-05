@@ -349,6 +349,32 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
 }
 
 fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
+    // Account overview: shows the active account with switch/logout actions.
+    if popup.kind == PopupKind::Account {
+        let box_area = popup_area(area, 56, 7);
+        frame.render_widget(Clear, box_area);
+        let username = if popup.vm.is_empty() { "-" } else { &popup.vm };
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("Logged in as {username}"),
+                Style::new().fg(Color::Green).bold(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Enter switch account · l logout · Esc close",
+                Style::new().dim(),
+            )),
+        ];
+        let block = Block::bordered()
+            .title(Span::styled(
+                format!(" Account — {username} "),
+                Style::new().fg(Color::Green).bold(),
+            ))
+            .border_style(Style::new().fg(Color::Green));
+        frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        return;
+    }
+
     // Read-only info box for already-PWNED machines: no fields, no submit.
     if popup.readonly {
         let box_area = popup_area(area, 56, 7);
@@ -402,6 +428,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
             vec!["Username:", "Password:"],
             "Enter save & connect · ↑↓/Tab switch field · Esc quit",
         ),
+        PopupKind::Account => unreachable!("rendered by the account branch above"),
     };
 
     let mut lines = Vec::new();
@@ -725,6 +752,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     let keys: String = if app.popup.is_some() {
         match app.popup.as_ref().map(|p| p.kind) {
             Some(PopupKind::Config) => "Enter save & connect · Esc quit".to_string(),
+            Some(PopupKind::Account) => "Enter switch account · l logout · Esc close".to_string(),
             _ => "Enter send · ↑↓/Tab switch field · Esc cancel".to_string(),
         }
     } else {

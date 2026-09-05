@@ -1,42 +1,48 @@
-mod banner;
-mod cli;
 mod commands;
 mod config;
 mod download;
 mod mega;
 mod modules;
 mod tui;
-mod ui;
-
-use clap::Parser;
-use console::style;
-
-use crate::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.first().map(String::as_str) {
+        None => commands::tui_cmd().await,
+        Some("--version" | "-V") => {
+            println!("hmv {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("--help" | "-h") => {
+            print_help();
+            Ok(())
+        }
+        Some(command) => {
+            eprintln!(
+                "[!] Unknown command '{command}'. HMV-CLI is dashboard-only since v1.0.0 — run 'hmv' to open the dashboard."
+            );
+            std::process::exit(1);
+        }
+    };
 
-    if let Err(error) = run(cli).await {
-        eprintln!("{} {error:#}", style("[!]").red().bold());
+    if let Err(error) = result {
+        eprintln!("[!] {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
-    match cli.command {
-        // Bare `hmv` is the dashboard (v0.7.0); subcommands stay for scripting.
-        None => commands::tui_cmd().await?,
-        Some(Commands::Config) => commands::config_cmd().await?,
-        Some(Commands::Stats) => {
-            println!("{}", banner::get_banner());
-            commands::stats_cmd().await?;
-        }
-        Some(Commands::Tui) => commands::tui_cmd().await?,
-        Some(Commands::Machine(args)) => {
-            println!("{}", banner::get_banner());
-            commands::machine_cmd(args).await?;
-        }
-    }
-    Ok(())
+fn print_help() {
+    println!(
+        "HMV-CLI v{} — HackMyVM Advanced Versatile Operations CLI Toolkit",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("  hmv            open the interactive dashboard");
+    println!("  hmv --version  print the version");
+    println!("  hmv --help     show this help");
+    println!();
+    println!("Everything else lives inside the dashboard: account management (a),");
+    println!("flag submission (f), downloads (d), writeups (w/u) and releases.");
+    println!("The classic CLI subcommands were removed in v1.0.0.");
 }

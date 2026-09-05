@@ -2,9 +2,9 @@
 
 ### HackMyVM Advanced Versatile Operations CLI Toolkit
 
-**HMV-CLI** is a modern toolkit designed specifically for the HackMyVM community. It lets you search for machines, download VMs, submit flags, and view community writeups efficiently, directly from your terminal.
+**HMV-CLI** is a modern toolkit for the HackMyVM community: search for machines, download VMs, submit flags, and view community writeups — all from an interactive terminal dashboard.
 
-Since **v0.7.0**, running `hmv` opens the **interactive dashboard (TUI)** — that is the primary interface. The classic CLI subcommands (`hmv stats`, `hmv machine ...`) remain fully available for scripting and one-liners.
+Since **v1.0.0**, HMV-CLI is **dashboard-only**: running `hmv` opens the interactive TUI, and all account management (first-time setup, switching accounts, logout) happens inside it. The classic CLI subcommands (`hmv stats`, `hmv machine ...`, `hmv config`) were removed — everything lives in the dashboard now.
 
 This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com/setyanoegraha/hackmyvm-commandlineinterface) — a single static binary, no Python runtime required.
 
@@ -12,25 +12,20 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
 
 ## Key Features
 
-* **Dashboard-first**: bare `hmv` opens the interactive TUI dashboard — your stats, accepted writeups, pending writeups, the full machine catalog and downloads in one screen.
-* **First-run config popup**: no manual setup — the dashboard walks you through account configuration on first launch (or when the stored password stopped working).
-* **Secure Auth**: credentials are stored using the system vault (Linux keyutils / Secret Service, Windows Credential Manager, macOS Keychain) via the `keyring` library. Only the username and your last download folder touch `~/.hmv/config.json`.
-* **Personal Statistics** (`hmv stats`): rank, title, country, points, roots/users, challenges, writeups, trophies and visual progress bars per difficulty.
-* **Machine Management**:
-    * Smart paginated machine listing (max 3 concurrent page fetches).
-    * Instant machine search by name.
-    * Filters for difficulty (beginner, intermediate, advanced) or OS (linux/windows).
-    * Global "Pwned" status synchronization to track your progress.
-    * Upcoming machine **release schedule** (`hmv machine -r`).
-* **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars — up to **2 VMs in parallel** (`-d a -d b`). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
-* **Flag Submission**: Submit flags with clear visual feedback — including **dual user/root flag submission** in one command (`-f <user> -f <root>`, max 2, concurrent).
-* **Writeups Access**: View community writeups (articles or videos) without opening a browser. **Submit your own writeup** directly (`-w --upload <url>`) once both flags are pwned.
+* **One command**: bare `hmv` opens the dashboard — your stats, accepted writeups, pending writeups, the full machine catalog and downloads in one screen.
+* **In-app account management**: first-run setup, account switching and logout via popups (`a`) — no extra commands to remember.
+* **Secure Auth**: credentials are stored using the system vault (Secret Service on Linux, Credential Manager on Windows, Keychain on macOS) via the `keyring` library. Only the username and your last download folder touch `~/.hmv/config.json`.
+* **Personal Statistics**: rank, title, country, points, roots/users, challenges, writeups, trophies and animated progress gauges per difficulty.
+* **Machine Management**: the complete catalog with color-coded difficulty, instant `/` filtering (name, difficulty, creator, status) and global "Pwned" status synchronization.
+* **High-Speed Downloader**: downloads VMs directly from MEGA — up to **2 in parallel** (extra ones queue). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
+* **Flag Submission**: dual user/root flag popup (`f`), both fields sent in parallel, status-aware (PWNED machines show a read-only box, DONE machines a "one remains" notice).
+* **Writeups Access**: read community writeups (`w`) and submit your own (`u`) without leaving the dashboard.
 
 ---
 
 ## Prerequisites
 
-* **OS**: Linux (primary target for v0.2.0; Windows/macOS builds should work but are untested).
+* **OS**: Linux (primary target; Windows/macOS builds should work but are untested).
 * An active account on [HackMyVM](https://hackmyvm.eu/).
 * A Secret Service provider on Linux (e.g. GNOME Keyring / KWallet) for credential storage.
 
@@ -58,40 +53,30 @@ cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git
 
 ## First Setup
 
-Nothing to configure by hand — just run `hmv`:
+Nothing to configure by hand — just run:
 
 ```bash
 hmv
 ```
 
-On the very first run (or when the stored password no longer works) the dashboard opens a **Configure HackMyVM** popup:
+On the very first run the dashboard opens a **Configure HackMyVM** popup:
 
 1. Type your HackMyVM **username**, then press `Tab` / `↓`.
 2. Type your **password** (hidden as `•••`), then press `Enter`.
 
 Credentials are validated with a real login **before** anything is saved. If the login fails, the popup reopens with your username kept; `Esc` quits the app.
 
-Prefer the terminal, or need to switch accounts later? Use the classic command:
-
-```bash
-hmv config
-```
-
-**Where your data lives:** the username and the last download folder are stored in `~/.hmv/config.json`; the password never touches disk — it goes into your OS vault (keyutils / Secret Service on Linux, Credential Manager on Windows, Keychain on macOS).
-
 ---
 
 ## Usage Guide
-
-Two ways to drive HMV-CLI: the **interactive dashboard** (primary) and the **CLI subcommands** (scripts & one-liners). Both use the same stored account.
-
-### 1. Interactive Dashboard — just run `hmv`
 
 ```bash
 hmv
 ```
 
-(`hmv tui` does the same.) Five keyboard-driven tabs:
+That's the whole command surface. `hmv --version` and `hmv --help` exist for completeness; any other argument is rejected with a hint back to the dashboard.
+
+Five keyboard-driven tabs:
 
 | Keys | Action |
 | :--- | :--- |
@@ -99,6 +84,7 @@ hmv
 | `↑` `↓` / `j` `k` | Move selection |
 | `g` / `Home` | Jump to the top of the list |
 | `/` | Filter the current list (type to narrow, `Enter` keeps it, `Esc` clears & exits) |
+| `a` | **Account popup** — shows the active account: `Enter` opens the login popup to switch accounts, `l` logs out, `Esc` closes |
 | `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
 | `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified before the file lands. |
 | `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
@@ -115,72 +101,22 @@ hmv
 - **Machines** — the complete catalog (VM, difficulty, creator, size, status) with color-coded difficulty.
 - **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
 
+### Account Management
+
+Press `a` anywhere in the dashboard:
+
+- **`Enter` — switch account**: opens the login popup with the current username prefilled. Enter the new credentials; they are validated by a real login before replacing the stored account, and the dashboard reloads with the new profile.
+- **`l` — logout**: removes the password from the system vault and the username from `~/.hmv/config.json` (your download-folder preference is kept), clears the dashboard and shows the login popup. Sign in with another account, or `Esc` to quit.
+- Running downloads are never affected — they use public MEGA links, not your session.
+
 Actions submitted from the TUI show their verdicts in a result popup that stays until dismissed (`User flag: ✓ ACCEPTED`, `Root flag: ✗ REJECTED`, ...) and trigger an automatic data refresh on close when your progress changed.
 
 Downloads run in the background (max 2 in parallel, extra ones queue): the Downloads overlay shows live gauges, speed and the final path; downloads keep running when the overlay is closed; quitting while a download is active asks for a second `q`.
 
-### 2. CLI for Scripting & One-liners
+### Where Your Data Lives
 
-| Command | Function |
-| :--- | :--- |
-| `hmv` / `hmv tui` | Launch the interactive dashboard. |
-| `hmv config` | (Re)configure your HackMyVM account. |
-| `hmv stats` | Show your personal stats: rank, points, trophies and progress. |
-| `hmv machine -l` | Show the latest 20 machines (`-p <n>` for another page). |
-| `hmv machine -a` | Show the entire machine catalog in one large table. |
-| `hmv machine -n <name>` | Search for machines by name (e.g., `hmv machine -n hunter`). |
-| `hmv machine -s <filter>` | Filter / sort by category: `beginner`, `intermediate`, `advanced`, `linux`, `windows`, `size`, `hacked`, `all`. |
-| `hmv machine -r` | Show the upcoming machine release schedule. |
-| `hmv machine -d <name>` | Download a machine by name (e.g., `hmv machine -d redacted`). |
-| `hmv machine -d <a> -d <b>` | Download two machines in parallel. |
-| `hmv machine -v <name> -f <flag>` | Submit a flag (e.g., `hmv machine -v fuzzz -f flag{abc}`). |
-| `hmv machine -v <name> -f <f1> -f <f2>` | Submit user & root flags concurrently. |
-| `hmv machine -v <name> -w` | View community writeups for a machine (e.g., `hmv machine -v skid -w`). |
-| `hmv machine -v <name> -w --upload <url>` | Submit your writeup link for a machine (requires both flags submitted). |
-
-#### Personal Statistics
-
-```bash
-hmv stats
-```
-
-```text
-User: demouser #38 | Title: [WTF] | Country: [ID] | Points: 1767 | Loved: ❤️ 9
--------------------------------------------------------
-[ Stats ]
-Total Roots   : 166
-...
-
-[ Trophies ]
-🏆 [vfinisher] [noobchad] [starter] ...
-
-[ Progress ]
-Total VMs     [#########-----------] 166 / 371
-Beginner      [###################-] 163 / 171
-Intermediate  [--------------------] 2 / 136
-Advanced      [--------------------] 1 / 64
-```
-
-#### Release Schedule
-
-```bash
-hmv machine -r
-```
-
-#### VM Interaction
-
-```bash
-hmv machine -d <vm_name>              # Download a VM
-hmv machine -v <vm_name> -w           # View community writeups
-hmv machine -v <vm_name> -f <flag>    # Submit a flag
-```
-
-#### Filter & Sort Examples
-
-* **By OS:** `hmv machine -s linux -a` or `hmv machine -s windows -a`
-* **By difficulty:** `hmv machine -s beginner -a`
-* **By size:** `hmv machine -s size -a`
-* **Only machines you pwned:** `hmv machine -s hacked -a`
+- `~/.hmv/config.json` — your username and the last download folder. Nothing else.
+- System vault — your password, under the `hmv-cli` service. Never on disk in plain text.
 
 ---
 
@@ -196,9 +132,7 @@ cargo install --git https://github.com/setyanoegraha/hmv-cli-rust.git --force
 cargo uninstall hmv
 ```
 
-Cleaning up Remaining Data
-
-HMV stores configuration in the `~/.hmv/` directory and the password in the system vault. Delete the folder (and the `hmv-cli` keyring entry) to clear all local data:
+HMV stores configuration in the `~/.hmv/` directory and the password in the system vault. Delete the folder (and the `hmv-cli` vault entry) to clear all local data:
 - Linux: `~/.hmv`
 
 ---
