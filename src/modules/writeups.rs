@@ -46,15 +46,15 @@ impl WriteupManager {
         Ok(())
     }
 
-    /// Submits a writeup link for a VM (only accepted after both user and
-    /// root flags have been submitted for that VM — enforced server-side).
-    pub async fn upload(&self, vm_name: &str, url: &str) -> Result<()> {
+    /// Network-only writeup submission; verdicts are returned, not printed,
+    /// so both the CLI and the TUI can render them their own way. (The
+    /// server only accepts this after both user and root flags were
+    /// submitted for the VM.)
+    pub async fn submit(&self, vm_name: &str, url: &str) -> Result<UploadVerdict> {
         let normalized = url.trim();
         if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
             bail!("Error: The writeup URL must start with http:// or https://.");
         }
-
-        let sp = crate::ui::spinner(format!("Submitting writeup for {vm_name}..."));
 
         // Resolve the canonical VM name first: the API rejects mismatched
         // casing ("liar" fails where "Liar" works), and the machine page's
@@ -64,8 +64,7 @@ impl WriteupManager {
             .get(&format!("/machines/machine.php?vm={vm_name}"))
             .await?;
         if machine_missing(&page) {
-            sp.finish_and_clear();
-            bail!("Error: Machine '{vm_name}' was not found.");
+            return Ok(UploadVerdict::NotFound);
         }
         let canonical = extract_hidden_vm(&page).unwrap_or_else(|| vm_name.to_string());
 
@@ -76,42 +75,78 @@ impl WriteupManager {
                 &[("writeup", normalized), ("vm", canonical.as_str())],
             )
             .await?;
-        sp.finish_and_clear();
 
         let msg = body.to_lowercase();
-        if msg.contains("submitted the writeup successfully") || msg.contains("correct") {
-            println!(
-                "{} Writeup submitted for {}!",
-                style("[✓]").green().bold(),
-                style(vm_name).white().bold()
-            );
-            println!(
-                "{} Link: {}",
-                style("[*]").blue(),
-                style(normalized).cyan()
-            );
+        Ok(if msg.contains("submitted the writeup successfully") || msg.contains("correct") {
+            UploadVerdict::Submitted
         } else if msg.contains("repeated writeup") {
-            println!(
-                "{} A writeup for {} was already submitted.",
-                style("[!]").yellow().bold(),
-                style(vm_name).white().bold()
-            );
+            UploadVerdict::Repeated
         } else if msg.contains("something went wrong") {
-            bail!(
-                "Error: The server rejected the writeup for '{vm_name}'. \
-                 Check that both user and root flags were submitted."
-            );
+            UploadVerdict::Rejected
         } else if msg.contains("not found") {
-            bail!("Error: Machine '{vm_name}' was not found.");
+            UploadVerdict::NotFound
         } else {
-            println!(
-                "{} Unknown server response: {}",
-                style("[?]").yellow().bold(),
-                body.trim()
-            );
+            UploadVerdict::Unknown(body.trim().to_string())
+        })
+    }
+
+    /// CLI wrapper around [`Self::submit`] with spinner and printed verdicts.
+    pub async fn upload(&self, vm_name: &str, url: &str) -> Result<()> {
+        let sp = crate::ui::spinner(format!("Submitting writeup for {vm_name}..."));
+        let verdict = match self.submit(vm_name, url).await {
+            Ok(verdict) => verdict,
+            Err(error) => {
+                sp.finish_and_clear();
+                return Err(error);
+            }
+        };
+        sp.finish_and_clear();
+
+        match verdict {
+            UploadVerdict::Submitted => {
+                println!(
+                    "{} Writeup submitted for {}!",
+                    style("[✓]").green().bold(),
+                    style(vm_name).white().bold()
+                );
+                println!("{} Link: {}", style("[*]").blue(), style(url.trim()).cyan());
+            }
+            UploadVerdict::Repeated => {
+                println!(
+                    "{} A writeup for {} was already submitted.",
+                    style("[!]").yellow().bold(),
+                    style(vm_name).white().bold()
+                );
+            }
+            UploadVerdict::Rejected => {
+                bail!(
+                    "Error: The server rejected the writeup for '{vm_name}'. \
+                     Check that both user and root flags were submitted."
+                );
+            }
+            UploadVerdict::NotFound => {
+                bail!("Error: Machine '{vm_name}' was not found.");
+            }
+            UploadVerdict::Unknown(body) => {
+                println!(
+                    "{} Unknown server response: {}",
+                    style("[?]").yellow().bold(),
+                    body
+                );
+            }
         }
         Ok(())
     }
+}
+
+/// Server verdict for a writeup submission.
+#[derive(Debug, Clone)]
+pub enum UploadVerdict {
+    Submitted,
+    Repeated,
+    Rejected,
+    NotFound,
+    Unknown(String),
 }
 
 /// Extracts the canonical VM name from the submission form's hidden field.

@@ -4,11 +4,12 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs,
+    Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    Tabs,
 };
 use ratatui::Frame;
 
-use super::{AppState, InputMode, Tab};
+use super::{AppState, InputMode, Popup, PopupKind, Tab};
 
 const ACCENT: Color = Color::Rgb(117, 206, 122);
 const WARN: Color = Color::Rgb(255, 212, 130);
@@ -29,9 +30,14 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         Tab::Stats => draw_stats(frame, body, app),
         Tab::Writeups => draw_writeups(frame, body, app),
         Tab::Pending => draw_pending(frame, body, app),
+        Tab::Machines => draw_machines(frame, body, app),
     }
 
     draw_footer(frame, footer, app);
+
+    if let Some(popup) = &app.popup {
+        draw_popup(frame, frame.area(), popup);
+    }
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
@@ -234,6 +240,11 @@ fn filter_block(app: &AppState) -> Block<'_> {
             app.visible_pending().len(),
             app.data.pending.len()
         ),
+        Tab::Machines => format!(
+            " Machines {}/{} ",
+            app.visible_machines().len(),
+            app.data.catalog.len()
+        ),
         Tab::Stats => String::new(),
     };
 
@@ -262,6 +273,96 @@ fn filter_block(app: &AppState) -> Block<'_> {
     block
 }
 
+fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
+    let visible = app.visible_machines();
+    let header = Row::new(["VM", "Difficulty", "Creator", "Size", "Status"])
+        .style(Style::new().fg(ACCENT).bold());
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .map(|m| {
+            let diff = m.difficulty.to_uppercase();
+            let diff_span = match diff.as_str() {
+                "BEGINNER" => Span::styled(diff, Style::new().fg(Color::Green)),
+                "INTERMEDIATE" => Span::styled(diff, Style::new().fg(WARN)),
+                "ADVANCED" => Span::styled(diff, Style::new().fg(Color::Red)),
+                _ => Span::raw(diff),
+            };
+            let status = m.status.to_uppercase();
+            let status_span = if status.contains("DONE") || status.contains("PWNED") {
+                Span::styled(status, Style::new().fg(Color::Green).bold())
+            } else {
+                Span::styled(status, Style::new().fg(WARN))
+            };
+            Row::new([
+                Span::styled(m.name.clone(), Style::new().fg(Color::White)),
+                diff_span,
+                Span::raw(m.creator.clone()),
+                Span::raw(m.size.clone()),
+                status_span,
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Length(14),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .row_highlight_style(
+        Style::new()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(filter_block(app));
+
+    let mut state = TableState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(table, area, &mut state);
+
+    app.set_visible_rows(visible_rows_in(area.height, visible.len()));
+}
+
+fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
+    let box_area = popup_area(area, 74, 7);
+    frame.render_widget(Clear, box_area);
+
+    let (title, prompt) = match popup.kind {
+        PopupKind::Flag => (format!(" Submit flag — {} ", popup.vm), "Flag token:"),
+        PopupKind::Upload => (format!(" Submit writeup — {} ", popup.vm), "Writeup URL:"),
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(prompt, Style::new().fg(ACCENT).bold())),
+        Line::from(Span::styled(
+            format!(" {}▏", popup.buffer),
+            Style::new().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("Enter send · Esc cancel", Style::new().dim())),
+    ];
+
+    let block = Block::bordered()
+        .title(Span::styled(title, Style::new().fg(WARN).bold()))
+        .border_style(Style::new().fg(WARN));
+
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
+fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     let [keys_area, status_area] = Layout::horizontal([
         Constraint::Fill(1),
@@ -269,13 +370,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     ])
     .areas(area);
 
-    let keys = match app.input_mode {
-        InputMode::Filter => "Enter confirm · Esc clear & exit filter",
-        InputMode::Normal => "Tab tabs · ↑↓/jk move · / filter · Enter open · r refresh · q quit",
+    let keys = if app.popup.is_some() {
+        "Enter send · Esc cancel"
+    } else {
+        match app.input_mode {
+            InputMode::Filter => "Enter confirm · Esc clear & exit filter",
+            InputMode::Normal => {
+                "Tab tabs · ↑↓/jk move · / filter · f flag · u writeup · Enter open · r refresh · q quit"
+            }
+        }
     };
     frame.render_widget(Paragraph::new(Span::styled(keys, Style::new().dim())), keys_area);
 
-    let status = if let Some(label) = app.fetching {
+    let status = if let Some(label) = &app.fetching {
         Span::styled(format!("⟳ {label}"), Style::new().fg(WARN).bold())
     } else {
         match (&app.status, app.status_expiry) {

@@ -9,7 +9,31 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
+use crate::modules::machines::Machine;
 use crate::modules::stats::{ProfileStats, ProfileWriteup};
+
+/// What a popup asks the user for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupKind {
+    Flag,
+    Upload,
+}
+
+/// A text-input popup bound to one machine.
+#[derive(Debug, Clone)]
+pub struct Popup {
+    pub kind: PopupKind,
+    pub vm: String,
+    pub buffer: String,
+}
+
+/// A user action queued from a popup, executed by the host application.
+#[derive(Debug, Clone)]
+pub struct TuiAction {
+    pub kind: PopupKind,
+    pub vm: String,
+    pub value: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct TuiData {
@@ -18,6 +42,8 @@ pub struct TuiData {
     pub progress: Vec<(String, u64, u64)>,
     /// Machines fully pwned (user+root flags) without an accepted writeup.
     pub pending: Vec<String>,
+    /// Full machine catalog for the Machines tab.
+    pub catalog: Vec<Machine>,
 }
 
 impl TuiData {
@@ -27,6 +53,7 @@ impl TuiData {
             stats: ProfileStats::default(),
             progress: Vec::new(),
             pending: Vec::new(),
+            catalog: Vec::new(),
         }
     }
 }
@@ -36,16 +63,18 @@ pub enum Tab {
     Stats,
     Writeups,
     Pending,
+    Machines,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Stats, Tab::Writeups, Tab::Pending];
+    pub const ALL: [Tab; 4] = [Tab::Stats, Tab::Writeups, Tab::Pending, Tab::Machines];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Stats => "Stats",
             Tab::Writeups => "Writeups",
             Tab::Pending => "Pending",
+            Tab::Machines => "Machines",
         }
     }
 
@@ -78,10 +107,14 @@ pub struct AppState {
     /// Set by `r`; consumed when the event loop is idle.
     pub refresh_requested: bool,
     /// When set, the footer shows `⟳ <label>` while a blocking fetch runs.
-    pub fetching: Option<&'static str>,
+    pub fetching: Option<String>,
     pub status: Option<String>,
     /// When the status message should disappear (5s lifetime).
     pub status_expiry: Option<std::time::Instant>,
+    /// Open text-input popup, if any.
+    pub popup: Option<Popup>,
+    /// Action queued by a popup, executed by the host application.
+    pub pending_action: Option<TuiAction>,
     pub data: TuiData,
     /// Row budget reported by the renderer after layout.
     pub last_visible_rows: Option<usize>,
@@ -103,6 +136,8 @@ impl AppState {
             fetching: None,
             status: None,
             status_expiry: None,
+            popup: None,
+            pending_action: None,
             data,
             last_visible_rows: None,
         }
@@ -111,7 +146,7 @@ impl AppState {
     /// Entry state for `hmv tui`: draws immediately, then loads all data.
     pub fn loading() -> Self {
         let mut state = Self::new(TuiData::empty());
-        state.fetching = Some("Loading data...");
+        state.fetching = Some("Loading data...".to_string());
         state
     }
 
@@ -178,11 +213,81 @@ impl AppState {
             .collect()
     }
 
+    /// Lowercase-filtered machine catalog for the Machines tab. Filter
+    /// matches name, difficulty, creator or status.
+    pub fn visible_machines(&self) -> Vec<&Machine> {
+        let needle = self.filter.to_lowercase();
+        self.data
+            .catalog
+            .iter()
+            .filter(|m| {
+                needle.is_empty()
+                    || m.name.to_lowercase().contains(&needle)
+                    || m.difficulty.to_lowercase().contains(&needle)
+                    || m.creator.to_lowercase().contains(&needle)
+                    || m.status.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    /// Name of the machine under the selection on machine-centric tabs.
+    pub fn selected_machine_name(&self) -> Option<String> {
+        match self.tab {
+            Tab::Machines => self
+                .visible_machines()
+                .get(self.selected)
+                .map(|m| m.name.clone()),
+            Tab::Pending => self
+                .visible_pending()
+                .get(self.selected)
+                .map(|vm| (*vm).clone()),
+            _ => None,
+        }
+    }
+
+    /// Opens the input popup for the given action on the selected machine.
+    pub fn open_action_popup(&mut self, kind: PopupKind) {
+        if self.popup.is_some() {
+            return;
+        }
+        if let Some(vm) = self.selected_machine_name() {
+            self.popup = Some(Popup {
+                kind,
+                vm,
+                buffer: String::new(),
+            });
+        } else {
+            self.set_status("Nothing selected to act on.");
+        }
+    }
+
+    /// Confirms the popup: queues the action and closes the popup.
+    pub fn confirm_popup(&mut self) {
+        if let Some(popup) = self.popup.take() {
+            let value = popup.buffer.trim().to_string();
+            if value.is_empty() {
+                self.set_status("Cancelled — empty input.");
+                return;
+            }
+            let kind_label = match popup.kind {
+                PopupKind::Flag => "flag",
+                PopupKind::Upload => "writeup URL",
+            };
+            self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
+            self.pending_action = Some(TuiAction {
+                kind: popup.kind,
+                vm: popup.vm,
+                value,
+            });
+        }
+    }
+
     fn row_count(&self) -> usize {
         match self.tab {
             Tab::Stats => 0,
             Tab::Writeups => self.visible_writeups().len(),
             Tab::Pending => self.visible_pending().len(),
+            Tab::Machines => self.visible_machines().len(),
         }
     }
 
@@ -286,12 +391,18 @@ impl AppState {
     }
 }
 
-/// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on demand.
-pub fn run(mut app: AppState, refetch: impl Fn() -> Result<TuiData>) -> Result<()> {
+/// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on
+/// demand; `run_action` executes a user action (flag/upload) and returns
+/// `(footer message, data changed)`.
+pub fn run(
+    mut app: AppState,
+    refetch: impl Fn() -> Result<TuiData>,
+    run_action: impl Fn(TuiAction) -> Result<(String, bool)>,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     // Kick off the first load (and any pending request) before looping.
     let mut pending_fetch = app.fetching.is_some();
-    let result = event_loop(&mut terminal, &mut app, &refetch, &mut pending_fetch);
+    let result = event_loop(&mut terminal, &mut app, &refetch, &run_action, &mut pending_fetch);
     ratatui::restore();
     result
 }
@@ -300,6 +411,7 @@ fn event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
     refetch: &dyn Fn() -> Result<TuiData>,
+    run_action: &dyn Fn(TuiAction) -> Result<(String, bool)>,
     pending_fetch: &mut bool,
 ) -> Result<()> {
     loop {
@@ -315,10 +427,32 @@ fn event_loop(
 
         app.tick();
 
+        // User actions from popups (flag submission, writeup upload).
+        if let Some(action) = app.pending_action.take() {
+            let label = match action.kind {
+                PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
+                PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
+            };
+            app.fetching = Some(label);
+            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
+
+            match run_action(action) {
+                Ok((message, changed)) => {
+                    app.set_status(message);
+                    if changed {
+                        // Pwned status / accepted writeups may have changed.
+                        app.refresh_requested = true;
+                    }
+                }
+                Err(error) => app.set_status(format!("Action failed: {error:#}")),
+            }
+            app.fetching = None;
+        }
+
         if app.should_fetch(*pending_fetch) {
             *pending_fetch = false;
             app.refresh_requested = false;
-            app.fetching = Some("Refreshing data...");
+            app.fetching = Some("Refreshing data...".to_string());
             // Draw immediately so the `⟳ <label>` shows while the blocking
             // fetch runs, instead of freezing silently.
             terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
@@ -346,6 +480,29 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
         return;
     }
 
+    // Popup input mode captures everything first.
+    if app.popup.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.popup = None;
+                app.set_status("Cancelled.");
+            }
+            KeyCode::Enter => app.confirm_popup(),
+            KeyCode::Backspace => {
+                if let Some(popup) = app.popup.as_mut() {
+                    popup.buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(popup) = app.popup.as_mut() {
+                    popup.buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match app.input_mode {
         InputMode::Filter => match key.code {
             KeyCode::Esc => {
@@ -366,6 +523,8 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Up | KeyCode::Char('k') => app.move_up(),
             KeyCode::Home | KeyCode::Char('g') => app.move_start(),
             KeyCode::Char('/') => app.enter_filter_mode(),
+            KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
+            KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
             KeyCode::Enter => app.open_selected_link(),
             _ => {}
         },
@@ -404,6 +563,24 @@ mod tests {
                 "Fuxa".to_string(),
                 "Liar".to_string(),
                 "Rooted".to_string(),
+            ],
+            catalog: vec![
+                Machine {
+                    name: "Fuxa".into(),
+                    creator: "0xM4r10".into(),
+                    size: "0.5 Gb".into(),
+                    difficulty: "beginner".into(),
+                    os: "linux".into(),
+                    status: "PWNED".into(),
+                },
+                Machine {
+                    name: "Nebula1".into(),
+                    creator: "Sublarge".into(),
+                    size: "1.3 Gb".into(),
+                    difficulty: "advanced".into(),
+                    os: "linux".into(),
+                    status: "TO HACK".into(),
+                },
             ],
         }
     }
@@ -487,16 +664,72 @@ mod tests {
 
         // While a fetch is running (label set), further requests are ignored.
         state.refresh_requested = false;
-        state.fetching = Some("Refreshing data...");
+        state.fetching = Some("Refreshing data...".to_string());
         state.request_refresh();
         assert!(!state.refresh_requested);
         assert!(!state.should_fetch(false));
     }
 
     #[test]
+    fn machines_tab_filters_and_selects() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab();
+        assert_eq!(state.tab, Tab::Machines);
+        assert_eq!(state.visible_machines().len(), 2);
+
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
+        state.filter_push('n');
+        state.filter_push('e');
+        state.filter_push('b');
+        assert_eq!(state.visible_machines().len(), 1);
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Nebula1"));
+    }
+
+    #[test]
+    fn popup_flow_queues_action() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab(); // Pending tab — machine-centric
+        assert_eq!(state.tab, Tab::Pending);
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
+
+        state.open_action_popup(PopupKind::Flag);
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.kind, PopupKind::Flag);
+        assert_eq!(popup.vm, "Fuxa");
+
+        state.popup.as_mut().unwrap().buffer.push_str("flag{abc}");
+        state.confirm_popup();
+        assert!(state.popup.is_none());
+        let action = state.pending_action.take().unwrap();
+        assert_eq!(action.vm, "Fuxa");
+        assert_eq!(action.value, "flag{abc}");
+        assert_eq!(action.kind, PopupKind::Flag);
+    }
+
+    #[test]
+    fn popup_rejects_empty_input_and_double_open() {
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab();
+        state.open_action_popup(PopupKind::Upload);
+        state.confirm_popup(); // empty buffer -> cancelled, no action
+        assert!(state.popup.is_none());
+        assert!(state.pending_action.is_none());
+
+        state.open_action_popup(PopupKind::Upload);
+        assert!(state.popup.is_some());
+        state.open_action_popup(PopupKind::Flag); // ignored while open
+        assert_eq!(state.popup.as_ref().unwrap().kind, PopupKind::Upload);
+    }
+
+    #[test]
     fn loading_state_shows_placeholder() {
         let state = AppState::loading();
-        assert_eq!(state.fetching, Some("Loading data..."));
+        assert_eq!(state.fetching, Some("Loading data...".to_string()));
         assert!(state.data.stats.accepted_writeups.is_empty());
         assert!(state.data.pending.is_empty());
         // Lists stay safe to render with no data.

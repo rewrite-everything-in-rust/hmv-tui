@@ -12,10 +12,99 @@ use crate::download::DownloadManager;
 use crate::modules::flag::FlagManager;
 use crate::modules::machines::MachineScraper;
 use crate::modules::releases::ReleaseScraper;
-use crate::modules::session::login;
+use crate::modules::session::{login, HmvSession};
 use crate::modules::stats::{ProfileStats, StatsManager};
 use crate::modules::writeups::WriteupManager;
-use crate::tui::TuiData;
+use crate::tui::{TuiAction, TuiData};
+
+/// Reusable authenticated session for the TUI's lifetime. Cloning an
+/// `HmvSession` is cheap (shared connection pool), so one login serves
+/// every background action.
+pub struct SessionCache {
+    session: HmvSession,
+    username: String,
+}
+
+impl SessionCache {
+    pub async fn new() -> Result<Self> {
+        let cfg = ConfigManager::new();
+        let (username, _) = cfg.load_credentials()?;
+        let session = login(&cfg).await?;
+        Ok(Self { session, username })
+    }
+
+    pub fn session(&self) -> HmvSession {
+        self.session.clone()
+    }
+}
+
+pub async fn tui_cmd() -> Result<()> {
+    // Enter the TUI instantly with an empty state; the first fetch runs
+    // inside the event loop with a `⟳ Loading data...` indicator.
+    let sessions = SessionCache::new().await?;
+    crate::tui::run(
+        crate::tui::AppState::loading(),
+        || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(fetch_tui_data(&sessions))
+            })
+        },
+        |action| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(run_tui_action(&sessions, action))
+            })
+        },
+    )
+}
+
+/// Executes a user action from a TUI popup. Returns the footer message and
+/// whether dashboard data should be re-fetched.
+async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<(String, bool)> {
+    match action.kind {
+        crate::tui::PopupKind::Flag => {
+            let verdict = FlagManager::new(sessions.session())
+                .check(&action.vm, &action.value)
+                .await?;
+            let (message, changed) = match verdict {
+                crate::modules::flag::FlagVerdict::Correct => {
+                    (format!("[✓] You hacked {}!", action.vm), true)
+                }
+                crate::modules::flag::FlagVerdict::Wrong => ("[!] Wrong flag — try harder!".into(), false),
+                crate::modules::flag::FlagVerdict::MachineNotFound => {
+                    (format!("[!] Machine '{}' not found.", action.vm), false)
+                }
+                crate::modules::flag::FlagVerdict::Unknown(body) => {
+                    (format!("[?] Unknown response: {body}"), false)
+                }
+            };
+            Ok((message, changed))
+        }
+        crate::tui::PopupKind::Upload => {
+            let verdict = WriteupManager::new(sessions.session())
+                .submit(&action.vm, &action.value)
+                .await?;
+            let message = match verdict {
+                crate::modules::writeups::UploadVerdict::Submitted => {
+                    format!("[✓] Writeup submitted for {}!", action.vm)
+                }
+                crate::modules::writeups::UploadVerdict::Repeated => {
+                    format!("[=] Writeup for {} was already submitted.", action.vm)
+                }
+                crate::modules::writeups::UploadVerdict::Rejected => {
+                    format!("[!] Server rejected writeup for {} — flags missing?", action.vm)
+                }
+                crate::modules::writeups::UploadVerdict::NotFound => {
+                    format!("[!] Machine '{}' not found.", action.vm)
+                }
+                crate::modules::writeups::UploadVerdict::Unknown(ref body) => {
+                    format!("[?] Unknown response: {body}")
+                }
+            };
+            let changed = matches!(verdict, crate::modules::writeups::UploadVerdict::Submitted);
+            Ok((message, changed))
+        }
+    }
+}
 
 pub async fn config_cmd() -> Result<()> {
     println!("{} HackMyVM Account Configuration", style("[*]").blue().bold());
@@ -25,26 +114,16 @@ pub async fn config_cmd() -> Result<()> {
     cfg.save_credentials(&username, &password)
 }
 
-pub async fn tui_cmd() -> Result<()> {
-    // Enter the TUI instantly with an empty state; the first fetch runs
-    // inside the event loop with a `⟳ Loading data...` indicator.
-    crate::tui::run(crate::tui::AppState::loading(), || {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(fetch_tui_data())
-        })
-    })
-}
-
 /// Fetches every dataset the dashboard shows: profile stats + accepted
 /// writeups, and the pwned catalog for gauges & pending machines.
 /// No terminal output here — the TUI owns the screen and reports progress
 /// through its footer (`⟳ Loading data...` / `⟳ Refreshing data...`).
-async fn fetch_tui_data() -> Result<TuiData> {
-    let cfg = ConfigManager::new();
-    let session = login(&cfg).await?;
-    let (username, _) = cfg.load_credentials()?;
+async fn fetch_tui_data(sessions: &SessionCache) -> Result<TuiData> {
+    let session = sessions.session();
 
-    let stats = StatsManager::new(session.clone()).get_stats(&username).await?;
+    let stats = StatsManager::new(session.clone())
+        .get_stats(&sessions.username)
+        .await?;
 
     let scraper = MachineScraper::new(session.clone());
     let mut catalog = machine::fetch_catalog(&scraper, "all").await?;
@@ -86,6 +165,7 @@ async fn fetch_tui_data() -> Result<TuiData> {
             ("Advanced".to_string(), difficulty("advanced").0, difficulty("advanced").1),
         ],
         pending,
+        catalog,
     })
 }
 
