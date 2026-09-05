@@ -21,6 +21,7 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
 * **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars — up to **2 VMs in parallel** (`-d a -d b`). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
 * **Flag Submission**: Submit flags with clear visual feedback — including **dual user/root flag submission** in one command (`-f <user> -f <root>`, max 2, concurrent).
 * **Writeups Access**: View community writeups (articles or videos) without opening a browser. **Submit your own writeup** directly from the CLI (`-w --upload <url>`) once both flags are pwned.
+* **Interactive Dashboard** (`hmv tui`): a ratatui-powered TUI with your stats & progress gauges, all accepted writeups (filterable, open links in the browser) and the list of pwned machines still missing a writeup.
 
 ---
 
@@ -112,6 +113,27 @@ Advanced      [--------------------] 1 / 64
 ```bash
 hmv machine -r
 ```
+
+### Interactive Dashboard (TUI)
+
+```bash
+hmv tui
+```
+
+Three tabs driven entirely by the keyboard:
+
+| Keys | Action |
+| :--- | :--- |
+| `Tab` / `←` `→` | Switch between **Stats**, **Writeups** and **Pending** |
+| `↑` `↓` / `j` `k` | Move selection |
+| `/` | Filter the current list (type to narrow, `Esc` clears) |
+| `Enter` | Open the selected writeup link in your browser |
+| `r` | Re-fetch all data |
+| `q` / `Esc` / `Ctrl-C` | Quit |
+
+- **Stats** — identity, achievements, trophies and animated progress gauges per difficulty.
+- **Writeups** — every writeup accepted on HackMyVM (VM, language, link).
+- **Pending** — machines you fully pwned (user + root flags) that still have no accepted writeup.
 
 ### VM Interaction
 

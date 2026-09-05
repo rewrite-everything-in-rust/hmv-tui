@@ -5,6 +5,7 @@ mod config;
 mod download;
 mod mega;
 mod modules;
+mod tui;
 mod ui;
 
 use clap::{CommandFactory, Parser};
@@ -33,6 +34,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{}", banner::get_banner());
             commands::stats_cmd().await?;
         }
+        Some(Commands::Tui) => commands::tui_cmd().await?,
         Some(Commands::Machine(args)) => {
             println!("{}", banner::get_banner());
             commands::machine_cmd(args).await?;

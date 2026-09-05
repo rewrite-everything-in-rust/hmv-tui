@@ -15,6 +15,7 @@ use crate::modules::releases::ReleaseScraper;
 use crate::modules::session::login;
 use crate::modules::stats::{ProfileStats, StatsManager};
 use crate::modules::writeups::WriteupManager;
+use crate::tui::{AppState, TuiData};
 
 pub async fn config_cmd() -> Result<()> {
     println!("{} HackMyVM Account Configuration", style("[*]").blue().bold());
@@ -22,6 +23,69 @@ pub async fn config_cmd() -> Result<()> {
     let password = config::prompt_password()?;
     let cfg = ConfigManager::new();
     cfg.save_credentials(&username, &password)
+}
+
+pub async fn tui_cmd() -> Result<()> {
+    let data = fetch_tui_data().await?;
+    crate::tui::run(AppState::new(data), || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(fetch_tui_data())
+        })
+    })
+}
+
+/// Fetches every dataset the dashboard shows: profile stats + accepted
+/// writeups, and the pwned catalog for gauges & pending machines.
+async fn fetch_tui_data() -> Result<TuiData> {
+    let cfg = ConfigManager::new();
+    let session = login(&cfg).await?;
+    let (username, _) = cfg.load_credentials()?;
+
+    let fetching = crate::ui::spinner("Fetching dashboard data...");
+    let stats = StatsManager::new(session.clone()).get_stats(&username).await?;
+
+    let scraper = MachineScraper::new(session.clone());
+    let mut catalog = machine::fetch_catalog(&scraper, "all").await?;
+    machine::sync_pwned_status(&scraper, &mut catalog).await?;
+    fetching.finish_and_clear();
+
+    let total_vms = catalog.len() as u64;
+    let pwned_vms = catalog.iter().filter(|m| m.status != "TO HACK").count() as u64;
+
+    let difficulty = |name: &str| -> (u64, u64) {
+        let matching: Vec<&crate::modules::machines::Machine> = catalog
+            .iter()
+            .filter(|m| m.difficulty.eq_ignore_ascii_case(name))
+            .collect();
+        let pwned = matching.iter().filter(|m| m.status != "TO HACK").count() as u64;
+        (pwned, matching.len() as u64)
+    };
+
+    let uploaded: std::collections::HashSet<String> = stats
+        .accepted_writeups
+        .iter()
+        .map(|w| w.vm.to_lowercase())
+        .collect();
+    let pending: Vec<String> = catalog
+        .iter()
+        .filter(|m| m.status != "TO HACK" && !uploaded.contains(&m.name.to_lowercase()))
+        .map(|m| m.name.clone())
+        .collect();
+
+    Ok(TuiData {
+        stats,
+        progress: vec![
+            ("Total VMs".to_string(), pwned_vms, total_vms),
+            ("Beginner".to_string(), difficulty("beginner").0, difficulty("beginner").1),
+            (
+                "Intermediate".to_string(),
+                difficulty("intermediate").0,
+                difficulty("intermediate").1,
+            ),
+            ("Advanced".to_string(), difficulty("advanced").0, difficulty("advanced").1),
+        ],
+        pending,
+    })
 }
 
 pub async fn stats_cmd() -> Result<()> {

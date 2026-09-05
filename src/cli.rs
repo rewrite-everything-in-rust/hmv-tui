@@ -20,6 +20,8 @@ pub enum Commands {
     Config,
     /// Show your personal HackMyVM statistics.
     Stats,
+    /// Launch the interactive dashboard (stats, writeups, pending).
+    Tui,
     /// Manage and interact with HackMyVM machines.
     Machine(MachineArgs),
 }

@@ -21,6 +21,15 @@ pub struct ProfileStats {
     pub writeups: u64,
     pub loved: u64,
     pub trophies: Vec<String>,
+    /// Writeups accepted on HackMyVM, parsed from the profile page table.
+    pub accepted_writeups: Vec<ProfileWriteup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileWriteup {
+    pub vm: String,
+    pub language: String,
+    pub url: String,
 }
 
 pub struct StatsManager {
@@ -130,7 +139,41 @@ pub fn parse_profile(html: &str) -> Result<ProfileStats> {
         .map(str::to_string)
         .collect();
 
+    // Accepted writeups table (Vmname | Link | Language).
+    stats.accepted_writeups = parse_profile_writeups(html);
+
     Ok(stats)
+}
+
+/// Parses the profile page's writeup table: `machine.php?vm=X` name, the
+/// blob/download link, and the language badge.
+pub fn parse_profile_writeups(html: &str) -> Vec<ProfileWriteup> {
+    let doc = scraper::Html::parse_document(html);
+
+    let row_sel = Selector::parse("table.table-user tbody tr").unwrap();
+    let vm_sel = Selector::parse("a.vmtitle").unwrap();
+    let link_sel = Selector::parse("a.download").unwrap();
+    let lang_sel = Selector::parse("span.size").unwrap();
+
+    doc.select(&row_sel)
+        .filter_map(|row| {
+            let vm = row
+                .select(&vm_sel)
+                .next()
+                .map(|a| a.text().collect::<String>().trim().to_string())?;
+            let url = row
+                .select(&link_sel)
+                .next()
+                .and_then(|a| a.value().attr("href"))
+                .map(str::to_string)?;
+            let language = row
+                .select(&lang_sel)
+                .next()
+                .map(|span| span.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+            Some(ProfileWriteup { vm, language, url })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -171,5 +214,29 @@ mod tests {
         assert_eq!(stats.writeups, 125);
         assert_eq!(stats.loved, 9);
         assert_eq!(stats.trophies, vec!["vfinisher", "poet"]);
+    }
+
+    const WRITEUPS_FIXTURE: &str = r#"
+    <html><body>
+    <table class="table table-user table-striped table-dark table-hover">
+    <thead><tr><th>Vmname</th><th>Link</th></tr></thead>
+    <tbody>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Economists">Economists</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/economists/economists.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Za1">Za1</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/za1/za1.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Fuxa">Fuxa</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/fuxa/fuxa.md" target="_blank"> Read!</a><br><span class="size"></span></tr>
+    </tbody>
+    </table>
+    </body></html>"#;
+
+    #[test]
+    fn parses_accepted_writeups_table() {
+        let writeups = parse_profile_writeups(WRITEUPS_FIXTURE);
+        assert_eq!(writeups.len(), 3);
+        assert_eq!(writeups[0].vm, "Economists");
+        assert_eq!(writeups[0].language, "English");
+        assert!(writeups[0].url.ends_with("economists/economists.md"));
+        assert_eq!(writeups[1].vm, "Za1");
+        assert_eq!(writeups[2].vm, "Fuxa");
+        assert!(writeups[2].language.is_empty());
     }
 }
