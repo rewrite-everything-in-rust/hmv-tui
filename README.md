@@ -124,11 +124,11 @@ Three tabs driven entirely by the keyboard:
 
 | Keys | Action |
 | :--- | :--- |
-| `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending** and **Machines** |
+| `Tab` / `←` `→` | Switch between **Stats**, **Writeups**, **Pending**, **Machines** and **Releases** |
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` | Filter the current list (type to narrow, `Esc` clears) |
-| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
-| `u` | **Pending only** — submit a writeup URL for the pwned machine |
+| `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
+| `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
 | `Enter` | Open the selected writeup link in your browser |
 | `r` | Re-fetch all data |
 | `q` / `Esc` / `Ctrl-C` | Quit |
@@ -137,8 +137,9 @@ Three tabs driven entirely by the keyboard:
 - **Writeups** — every writeup accepted on HackMyVM (VM, language, link).
 - **Pending** — machines you fully pwned (user + root flags) that still have no accepted writeup.
 - **Machines** — the complete catalog (VM, difficulty, creator, size, status) with color-coded difficulty.
+- **Releases** — the upcoming machine release schedule (RELEASED / UPCOMING).
 
-Actions submitted from the TUI show their verdict in the footer (`[✓] You hacked X!`, `[!] Wrong flag`, `[=] already submitted`, ...) and trigger an automatic data refresh when they change your progress.
+Actions submitted from the TUI show their verdicts in a result popup that stays until dismissed (`User flag: ✓ ACCEPTED`, `Root flag: ✗ REJECTED`, ...) and trigger an automatic data refresh on close when your progress changed.
 
 ### VM Interaction
 
