@@ -1,1 +1,6 @@
 /target
+
+# VM download artifacts
+*.zip
+*.part
+*.ova

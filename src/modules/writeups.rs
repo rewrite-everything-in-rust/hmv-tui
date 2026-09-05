@@ -30,7 +30,7 @@ impl WriteupManager {
             .get(&format!("/machines/machine.php?vm={vm_name}"))
             .await?;
 
-        if html.contains("machine not found") {
+        if machine_missing(&html) {
             sp.finish_and_clear();
             return Err(crate::modules::HmvError::MachineNotFound(vm_name.to_string()).into());
         }
@@ -44,6 +44,100 @@ impl WriteupManager {
 
         print_table(vm_name, &writeups);
         Ok(())
+    }
+
+    /// Submits a writeup link for a VM (only accepted after both user and
+    /// root flags have been submitted for that VM — enforced server-side).
+    pub async fn upload(&self, vm_name: &str, url: &str) -> Result<()> {
+        let normalized = url.trim();
+        if !normalized.starts_with("http://") && !normalized.starts_with("https://") {
+            bail!("Error: The writeup URL must start with http:// or https://.");
+        }
+
+        let sp = crate::ui::spinner(format!("Submitting writeup for {vm_name}..."));
+
+        // Resolve the canonical VM name first: the API rejects mismatched
+        // casing ("liar" fails where "Liar" works), and the machine page's
+        // hidden form field carries the exact spelling.
+        let page = self
+            .session
+            .get(&format!("/machines/machine.php?vm={vm_name}"))
+            .await?;
+        if machine_missing(&page) {
+            sp.finish_and_clear();
+            bail!("Error: Machine '{vm_name}' was not found.");
+        }
+        let canonical = extract_hidden_vm(&page).unwrap_or_else(|| vm_name.to_string());
+
+        let body = self
+            .session
+            .post_form(
+                "/machines/checkwriteup.php",
+                &[("writeup", normalized), ("vm", canonical.as_str())],
+            )
+            .await?;
+        sp.finish_and_clear();
+
+        let msg = body.to_lowercase();
+        if msg.contains("submitted the writeup successfully") || msg.contains("correct") {
+            println!(
+                "{} Writeup submitted for {}!",
+                style("[✓]").green().bold(),
+                style(vm_name).white().bold()
+            );
+            println!(
+                "{} Link: {}",
+                style("[*]").blue(),
+                style(normalized).cyan()
+            );
+        } else if msg.contains("repeated writeup") {
+            println!(
+                "{} A writeup for {} was already submitted.",
+                style("[!]").yellow().bold(),
+                style(vm_name).white().bold()
+            );
+        } else if msg.contains("something went wrong") {
+            bail!(
+                "Error: The server rejected the writeup for '{vm_name}'. \
+                 Check that both user and root flags were submitted."
+            );
+        } else if msg.contains("not found") {
+            bail!("Error: Machine '{vm_name}' was not found.");
+        } else {
+            println!(
+                "{} Unknown server response: {}",
+                style("[?]").yellow().bold(),
+                body.trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Extracts the canonical VM name from the submission form's hidden field.
+fn extract_hidden_vm(html: &str) -> Option<String> {
+    let marker = html.find("name=\"vm\" type=\"hidden\"")?;
+    let rest = &html[marker..];
+    let start = rest.find("value=\"")? + "value=\"".len();
+    let end = rest[start..].find('"')? + start;
+    Some(rest[start..end].to_string())
+}
+
+/// The server renders a tiny error page for unknown VMs.
+fn machine_missing(html: &str) -> bool {
+    html.to_lowercase().contains("machine doesnt exist")
+        || html.to_lowercase().contains("machine not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_canonical_vm_from_hidden_field() {
+        let html = r#"<form action="checkwriteup.php" method="post"><input name="vm" type="hidden" value="Fuxa" /></form>"#;
+        assert_eq!(extract_hidden_vm(html).as_deref(), Some("Fuxa"));
+        assert_eq!(extract_hidden_vm("<html></html>"), None);
     }
 }
 

@@ -63,6 +63,10 @@ pub struct MachineArgs {
     #[arg(short, long)]
     pub writeups: bool,
 
+    /// Submit a writeup URL for the target VM (Requires -v and -w).
+    #[arg(long, value_name = "URL")]
+    pub upload: Option<String>,
+
     /// Show the upcoming machine release schedule.
     #[arg(short = 'r', long)]
     pub release: bool,
@@ -84,6 +88,7 @@ Usage Examples:
 10. Get community writeups:                     hmv machine -v <name> -w
 11. Submit a flag:                              hmv machine -v <name> -f <flag>
 12. Submit user & root flags:                   hmv machine -v <name> -f <flag1> -f <flag2>
+13. Submit your writeup:                        hmv machine -v <name> -w --upload <url>
 
 Personal Statistics:
     Show rank, points, trophies and progress:   hmv stats";

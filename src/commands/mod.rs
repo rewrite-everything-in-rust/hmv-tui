@@ -154,8 +154,18 @@ pub async fn machine_cmd(args: MachineArgs) -> Result<()> {
         let Some(vm) = args.vm.clone() else {
             anyhow::bail!("Error: Target VM name (-v) is required to fetch writeups.");
         };
+        if let Some(url) = &args.upload {
+            WriteupManager::new(session.clone())
+                .upload(&vm, url)
+                .await?;
+            return Ok(());
+        }
         WriteupManager::new(session.clone()).get_writeups(&vm).await?;
         return Ok(());
+    }
+
+    if let Some(_url) = &args.upload {
+        anyhow::bail!("Error: Writeup submission requires -v <vm> and -w.");
     }
 
     if !args.flag.is_empty() {

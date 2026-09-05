@@ -20,7 +20,7 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
     * Upcoming machine **release schedule** (`hmv machine -r`).
 * **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars — up to **2 VMs in parallel** (`-d a -d b`). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
 * **Flag Submission**: Submit flags with clear visual feedback — including **dual user/root flag submission** in one command (`-f <user> -f <root>`, max 2, concurrent).
-* **Writeups Access**: View community writeups (articles or videos) without opening a browser.
+* **Writeups Access**: View community writeups (articles or videos) without opening a browser. **Submit your own writeup** directly from the CLI (`-w --upload <url>`) once both flags are pwned.
 
 ---
 
@@ -82,6 +82,7 @@ hmv config
 | `hmv machine -v <name> -f <flag>` | Submit flag for some machine (e.g, `hmv machine -v fuzzz -f flag{abc}`). |
 | `hmv machine -v <name> -f <f1> -f <f2>` | Submit user & root flags concurrently. |
 | `hmv machine -v <name> -w` | See write-up for machine from community (e.g., `hmv machine -v skid -w`). |
+| `hmv machine -v <name> -w --upload <url>` | Submit your writeup link for a machine (requires both flags submitted). |
 
 ### Personal Statistics
 
