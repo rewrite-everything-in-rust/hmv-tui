@@ -1800,14 +1800,11 @@ mod tests {
     fn quit_warns_once_while_downloads_are_active() {
         let mut state = app();
         state.download_jobs = vec![std::sync::Arc::new(crate::tui::downloads::DownloadJob {
-            id: 1,
             vm: "Xslib".into(),
-            dest_dir: "/tmp".into(),
             state: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::tui::downloads::DownloadState::default(),
             )),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            handle: None,
         })];
 
         // First q warns instead of quitting.

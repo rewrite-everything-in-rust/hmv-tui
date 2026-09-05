@@ -4,7 +4,7 @@
 //! queueing (max 2 parallel) and cancelling.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -14,8 +14,6 @@ use crate::mega::{self, DownloadHooks};
 
 /// At most two VM archives are pulled from MEGA in parallel.
 pub const PARALLEL_DOWNLOADS: usize = 2;
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -74,16 +72,9 @@ impl DownloadState {
 
 #[derive(Debug)]
 pub struct DownloadJob {
-    #[allow(dead_code)] // identifies the job; kept for future introspection
-    pub id: u64,
     pub vm: String,
-    #[allow(dead_code)] // shown in the Done message path; kept for reference
-    pub dest_dir: PathBuf,
     pub state: Arc<Mutex<DownloadState>>,
     pub cancel: Arc<AtomicBool>,
-    /// `None` only in unit tests; real jobs carry their spawned handle.
-    #[allow(dead_code)]
-    pub handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DownloadJob {
@@ -115,13 +106,14 @@ pub fn start_download(vm: String, dest_dir: PathBuf) -> Result<DownloadJob> {
 
     let state = Arc::new(Mutex::new(DownloadState::default()));
     let cancel = Arc::new(AtomicBool::new(false));
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
     let task_state = state.clone();
     let task_cancel = cancel.clone();
     let task_vm = vm.clone();
     let task_dest = dest_dir.clone();
-    let handle = tokio::spawn(async move {
+    // The task runs detached: cancellation goes through the shared flag and
+    // `.part` cleanup through DownloadJob::remove_part.
+    tokio::spawn(async move {
         let vm = task_vm;
         let dest_dir = task_dest;
         let hooks = DownloadHooks {
@@ -163,12 +155,9 @@ pub fn start_download(vm: String, dest_dir: PathBuf) -> Result<DownloadJob> {
     });
 
     Ok(DownloadJob {
-        id,
         vm,
-        dest_dir,
         state,
         cancel,
-        handle: Some(handle),
     })
 }
 
@@ -204,41 +193,14 @@ mod tests {
     #[test]
     fn job_defaults_to_resolving_and_can_be_cancelled() {
         let job = DownloadJob {
-            id: 1,
             vm: "Arcane".into(),
-            dest_dir: PathBuf::from("/tmp"),
             state: Arc::new(Mutex::new(DownloadState::default())),
             cancel: Arc::new(AtomicBool::new(false)),
-            handle: None,
         };
         assert!(job.is_active());
         job.request_cancel();
         // Flag is set even though no task consumed it yet.
         // Phase only changes once the (absent) task observes it.
         assert!(job.is_active());
-    }
-}
-
-#[cfg(test)]
-mod live_tests {
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // network test: cargo test download_task_completes -- --ignored --nocapture
-    async fn download_task_completes() {
-        let dir = PathBuf::from("/tmp/opencode/tuidl");
-        let _ = std::fs::create_dir_all(&dir);
-        let job = start_download("Flute".into(), dir).unwrap();
-        for _ in 0..240 {
-            if !job.is_active() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-        let s = job.state.lock().unwrap();
-        panic!(
-            "phase={:?} downloaded={} total={} msg={} part={:?}",
-            s.phase, s.downloaded, s.total, s.message, s.part_path
-        );
     }
 }
