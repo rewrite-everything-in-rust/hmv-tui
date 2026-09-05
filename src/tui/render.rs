@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    Block, Borders, Clear, LineGauge, List, ListItem, ListState, Paragraph, Row, Table, TableState,
     Tabs,
 };
 use ratatui::Frame;
@@ -91,6 +91,8 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &AppState) {
     let index = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
     let tabs = Tabs::new(titles)
         .select(index)
+        // Dim the inactive tabs so the highlighted one stands out.
+        .style(Style::new().dim())
         .highlight_style(Style::new().fg(ACCENT).bold().underlined());
     frame.render_widget(tabs, area);
 }
@@ -130,35 +132,36 @@ fn draw_stats(frame: &mut Frame, area: Rect, app: &AppState) {
     let title = Paragraph::new(Span::styled("[ Progress ]", Style::new().fg(ACCENT).bold()));
     frame.render_widget(title, right);
 
-    let rows = app.data.progress.len() as u16;
-    if rows > 0 {
-        let gauge_area = Rect {
-            x: right.x + 2,
-            y: right.y + 2,
-            width: right.width.saturating_sub(4),
-            height: right.height.saturating_sub(2),
-        };
-
-        let inner: Vec<Constraint> = app
-            .data
-            .progress
-            .iter()
-            .map(|_| Constraint::Length(2))
-            .collect();
-        let slots = Layout::vertical(inner).split(gauge_area);
-
-        for ((label, value, total), slot) in app.data.progress.iter().zip(slots.iter()) {
-            let ratio = if *total == 0 {
-                0.0
-            } else {
-                (*value as f64) / (*total as f64)
-            };
-            let gauge = Gauge::default()
-                .label(format!("{label}: {value} / {total}"))
-                .ratio(ratio.clamp(0.0, 1.0))
-                .gauge_style(Style::new().fg(ACCENT).bg(Color::DarkGray));
-            frame.render_widget(gauge, *slot);
+    // One single-row gauge per metric: "Total VMs 167/371 (45%) ━━━━░░░░".
+    // The old two-row Gauge buried its centered label inside the bar, which
+    // rendered as unmarked block rows on wide terminals.
+    let mut y = right.y + 2;
+    let width = right.width.saturating_sub(4).max(16);
+    for (label, value, total) in &app.data.progress {
+        if y + 1 > right.bottom() {
+            break;
         }
+        let slot = Rect {
+            x: right.x + 2,
+            y,
+            width,
+            height: 1,
+        };
+        let ratio = if *total == 0 {
+            0.0
+        } else {
+            (*value as f64) / (*total as f64)
+        };
+        let percent = (ratio * 100.0).round() as u64;
+        let gauge = LineGauge::default()
+            .label(Span::styled(
+                format!("{label} {value}/{total} ({percent}%)"),
+                Style::new().fg(Color::White),
+            ))
+            .ratio(ratio.clamp(0.0, 1.0))
+            .filled_style(Style::new().fg(ACCENT));
+        frame.render_widget(gauge, slot);
+        y += 2; // gauge row + one blank row
     }
 }
 
@@ -766,7 +769,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
                     Tab::Machines => "jk move · / filter · f flag · d download · ".to_string(),
                     Tab::Releases => "jk move · / filter · ".to_string(),
                 };
-                let common = "r refresh · q quit";
+                let common = "a account · r refresh · q quit";
                 if list_keys.is_empty() {
                     format!("Tab switch · {common}")
                 } else {
