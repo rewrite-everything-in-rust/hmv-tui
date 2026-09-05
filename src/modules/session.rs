@@ -34,15 +34,6 @@ impl HmvSession {
         Ok(resp.text().await?)
     }
 
-    /// Runs a GET and returns the raw response (needed for redirect handling).
-    pub async fn get_raw(&self, url: &str) -> Result<reqwest::Response> {
-        self.client
-            .get(url)
-            .send()
-            .await
-            .context("Connection error")
-    }
-
     /// Runs a form POST through the authenticated client and returns the body text.
     pub async fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<String> {
         let resp = self

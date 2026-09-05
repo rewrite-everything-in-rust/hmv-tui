@@ -58,6 +58,20 @@ async fn fetch_remaining_pages(
     Ok(out)
 }
 
+/// Fetches the complete catalog for a level, deduplicated by lowercase name.
+pub async fn fetch_catalog(scraper: &MachineScraper, level: &str) -> Result<Vec<Machine>> {
+    let first = scraper.get_machines(1, Some(level)).await?;
+    let total = total_pages_of(&first.pages_info);
+    let mut machines = first.machines;
+    if total > 1 {
+        machines.extend(fetch_remaining_pages(scraper, Some(level), total).await?);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    machines.retain(|m| seen.insert(m.name.trim().to_lowercase()));
+    Ok(machines)
+}
+
 /// Fetches the full "hacked" catalog and overwrites matching statuses.
 pub async fn sync_pwned_status(scraper: &MachineScraper, machines: &mut [Machine]) -> Result<()> {
     let first = scraper.get_machines(1, Some("hacked")).await?;

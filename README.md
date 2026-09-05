@@ -11,13 +11,15 @@ This is the **Rust rewrite** of the original Python [HMV-CLI](https://github.com
 ## Key Features
 
 * **Secure Auth**: Securely stores your credentials using the system vault (Linux keyutils / Secret Service, Windows Credential Manager, macOS Keychain) via the `keyring` library. Only the username touches `~/.hmv/config.json`.
+* **Personal Statistics** (`hmv stats`): rank, title, country, points, roots/users, challenges, writeups, trophies and visual progress bars per difficulty.
 * **Machine Management**:
     * Smart paginated machine listing (max 3 concurrent page fetches).
     * Instant machine search by name.
     * Filters for difficulty (beginner, intermediate, advanced) or OS (linux/windows).
     * Global "Pwned" status synchronization to track your progress.
-* **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars. Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
-* **Flag Submission**: Submit flags from the terminal with clear visual feedback.
+    * Upcoming machine **release schedule** (`hmv machine -r`).
+* **High-Speed Downloader**: Downloads VMs directly from MEGA with accurate progress bars — up to **2 VMs in parallel** (`-d a -d b`). Files are decrypted on the fly (AES-128-CTR) and **integrity-verified with the MEGA per-chunk MAC** before being moved out of the `.part` staging file.
+* **Flag Submission**: Submit flags with clear visual feedback — including **dual user/root flag submission** in one command (`-f <user> -f <root>`, max 2, concurrent).
 * **Writeups Access**: View community writeups (articles or videos) without opening a browser.
 
 ---
@@ -69,13 +71,46 @@ hmv config
 | Command | Function |
 | :--- | :--- |
 | `hmv` | Show banner and help menu. |
+| `hmv stats` | Show your personal stats: rank, points, trophies and progress. |
 | `hmv machine -l` | Show the latest 20 machines from HackMyVM. |
 | `hmv machine -a` | Show the entire machine catalog in one large table. |
 | `hmv machine -n <name>` | Search for machines by name (e.g., `hmv machine -n hunter`). |
 | `hmv machine -s <filter>` | Sorting / Filtering the machines by some category (e.g., `hmv machine -s beginner`). |
+| `hmv machine -r` | Show the upcoming machine release schedule. |
 | `hmv machine -d <name>` | Download for machine by name (e.g., `hmv machine -d redacted`). |
+| `hmv machine -d <a> -d <b>` | Download two machines in parallel. |
 | `hmv machine -v <name> -f <flag>` | Submit flag for some machine (e.g, `hmv machine -v fuzzz -f flag{abc}`). |
+| `hmv machine -v <name> -f <f1> -f <f2>` | Submit user & root flags concurrently. |
 | `hmv machine -v <name> -w` | See write-up for machine from community (e.g., `hmv machine -v skid -w`). |
+
+### Personal Statistics
+
+```bash
+hmv stats
+```
+
+```text
+User: demouser #38 | Title: [WTF] | Country: [ID] | Points: 1767 | Loved: ❤️ 9
+-------------------------------------------------------
+[ Stats ]
+Total Roots   : 166
+...
+
+[ Trophies ]
+🏆 [vfinisher] [noobchad] [starter] ...
+
+[ Progress ]
+Total VMs     [#########-----------] 166 / 371
+Beginner      [###################-] 163 / 171
+Intermediate  [--------------------] 2 / 136
+Advanced      [--------------------] 1 / 64
+```
+
+### Release Schedule
+
+```bash
+hmv machine -r
+```
 
 ### VM Interaction
 

@@ -2,7 +2,9 @@
 
 pub mod flag;
 pub mod machines;
+pub mod releases;
 pub mod session;
+pub mod stats;
 pub mod writeups;
 
 use thiserror::Error;

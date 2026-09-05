@@ -29,6 +29,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Cli::command().print_help()?;
         }
         Some(Commands::Config) => commands::config_cmd().await?,
+        Some(Commands::Stats) => {
+            println!("{}", banner::get_banner());
+            commands::stats_cmd().await?;
+        }
         Some(Commands::Machine(args)) => {
             println!("{}", banner::get_banner());
             commands::machine_cmd(args).await?;

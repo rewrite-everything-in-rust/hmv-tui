@@ -20,7 +20,13 @@ struct PublicFile {
     url: String,
 }
 
-pub async fn download_public(url: &str, destination: &Path) -> Result<PathBuf> {
+/// Downloads and decrypts a public MEGA file, reporting through `progress`.
+/// Pass a `ProgressBar` attached to a `MultiProgress` for batch operations.
+pub async fn download_public(
+    url: &str,
+    destination: &Path,
+    progress: ProgressBar,
+) -> Result<PathBuf> {
     let info_spinner = crate::ui::spinner("Fetching file metadata...");
     let (file, keys) = fetch_public_file(url).await?;
     info_spinner.finish_and_clear();
@@ -32,7 +38,7 @@ pub async fn download_public(url: &str, destination: &Path) -> Result<PathBuf> {
     }
 
     let part = destination.join(format!("{filename}.part"));
-    let progress = ProgressBar::new(file.size);
+    progress.set_length(file.size);
     progress.set_style(
         ProgressStyle::with_template(
             "{spinner:.blue} {msg} {bar:40.cyan/blue} {percent:>3}% • {bytes}/{total_bytes} • {bytes_per_sec} • {eta}",
