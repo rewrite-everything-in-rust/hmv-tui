@@ -1,6 +1,6 @@
 [package]
 name = "hmv"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "HMV-TUI: HackMyVM Advanced Versatile Operations Toolkit — an interactive terminal dashboard for machine management"
 license = "MIT"

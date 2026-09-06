@@ -54,6 +54,8 @@ pub struct Popup {
     pub notice: Option<String>,
     /// Info-only popup: no fields, Enter/Esc just closes it.
     pub readonly: bool,
+    /// Path-completion candidates for the Descarga popup (Tab).
+    pub completions: Vec<String>,
 }
 
 impl Popup {
@@ -61,12 +63,15 @@ impl Popup {
         if let Some(buffer) = self.buffers.get_mut(self.field) {
             buffer.push(c);
         }
+        // Typing invalidates a previous completion listing.
+        self.completions.clear();
     }
 
     pub fn pop(&mut self) {
         if let Some(buffer) = self.buffers.get_mut(self.field) {
             buffer.pop();
         }
+        self.completions.clear();
     }
 
     pub fn next_field(&mut self) {
@@ -80,6 +85,99 @@ impl Popup {
             self.field = (self.field + self.buffers.len() - 1) % self.buffers.len();
         }
     }
+
+    /// zsh-style destination completion for the Descarga popup: `Tab`
+    /// expands `~`, completes the last path component against the parent
+    /// directory's subdirectories (common prefix first) and stores the
+    /// candidate list so the popup can display it.
+    pub fn complete_destination(&mut self) {
+        let Some(buffer) = self.buffers.get_mut(0) else {
+            return;
+        };
+        let raw = buffer.clone();
+        let expanded = expand_tilde(&raw);
+        let ends_with_sep = raw.ends_with('/');
+        // A trailing separator means "complete inside this directory": the
+        // partial component is empty even though Path::file_name would
+        // still report one.
+        let (parent, partial) = if ends_with_sep {
+            (expanded.clone(), String::new())
+        } else {
+            split_parent_partial(&expanded)
+        };
+
+        let mut matches: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !partial.is_empty() && !name.starts_with(partial.as_str()) {
+                    continue;
+                }
+                // Skip hidden dirs unless the user typed the dot herself.
+                if name.starts_with('.') && (partial.is_empty() || !partial.starts_with('.')) {
+                    continue;
+                }
+                if entry.path().is_dir() {
+                    matches.push(name);
+                }
+            }
+        }
+        matches.sort();
+        if matches.is_empty() {
+            self.completions.clear();
+            return;
+        }
+
+        let completed = common_prefix(&matches);
+        // Replace the partial component with the completed prefix, keeping
+        // the original `~` spelling the user typed.
+        let mut new_raw = raw[..raw.len().saturating_sub(partial.chars().count())].to_string();
+        new_raw.push_str(&completed);
+        if matches.len() == 1 && completed == matches[0] && !ends_with_sep {
+            new_raw.push(std::path::MAIN_SEPARATOR);
+        }
+        *buffer = new_raw;
+        self.completions = matches;
+    }
+}
+
+/// `~` and `~/...` expand to the user's home directory.
+fn expand_tilde(raw: &str) -> std::path::PathBuf {
+    if raw == "~" {
+        return home::home_dir().unwrap_or_else(|| std::path::PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = home::home_dir() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(raw)
+}
+
+/// Splits an expanded path into (parent directory, last component); paths
+/// ending in a separator (or the filesystem root) complete with no partial.
+fn split_parent_partial(expanded: &std::path::Path) -> (std::path::PathBuf, String) {
+    if expanded.as_os_str().is_empty() {
+        return (std::path::PathBuf::from("."), String::new());
+    }
+    match (expanded.parent(), expanded.file_name()) {
+        (Some(parent), Some(name)) => (parent.to_path_buf(), name.to_string_lossy().to_string()),
+        _ => (expanded.to_path_buf(), String::new()),
+    }
+}
+
+/// Longest prefix shared by every candidate.
+fn common_prefix(items: &[String]) -> String {
+    let mut prefix = items[0].clone();
+    for item in &items[1..] {
+        while !item.starts_with(&prefix) {
+            prefix.pop();
+            if prefix.is_empty() {
+                return prefix;
+            }
+        }
+    }
+    prefix
 }
 
 /// A user action queued from a popup, executed by the host application.
@@ -600,6 +698,7 @@ impl AppState {
                     field: 0,
                     notice: None,
                     readonly: true,
+            completions: Vec::new(),
                 });
                 return;
             }
@@ -615,6 +714,7 @@ impl AppState {
                 field: 0,
                 notice,
                 readonly: false,
+            completions: Vec::new(),
             });
             return;
         }
@@ -631,6 +731,7 @@ impl AppState {
                 field: 0,
                 notice: None,
                 readonly: false,
+            completions: Vec::new(),
             });
             return;
         }
@@ -642,6 +743,7 @@ impl AppState {
             field: 0,
             notice: None,
             readonly: false,
+            completions: Vec::new(),
         });
     }
 
@@ -664,6 +766,7 @@ impl AppState {
             field: 0,
             notice: Some(notice.to_string()),
             readonly: false,
+            completions: Vec::new(),
         });
     }
 
@@ -685,6 +788,7 @@ impl AppState {
             field: 0,
             notice: None,
             readonly: true,
+            completions: Vec::new(),
         });
     }
 
@@ -1287,7 +1391,18 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
                     popup.previous_field();
                 }
             }
-            KeyCode::Down | KeyCode::Tab => {
+            KeyCode::Tab => {
+                let is_download =
+                    app.popup.as_ref().map(|p| p.kind) == Some(PopupKind::Download);
+                if let Some(popup) = app.popup.as_mut() {
+                    if is_download {
+                        popup.complete_destination();
+                    } else {
+                        popup.next_field();
+                    }
+                }
+            }
+            KeyCode::Down => {
                 if let Some(popup) = app.popup.as_mut() {
                     popup.next_field();
                 }
@@ -1869,6 +1984,57 @@ mod tests {
         assert!(state.popup.is_some());
         state.open_action_popup(PopupKind::Flag); // ignored while open
         assert_eq!(state.popup.as_ref().unwrap().kind, PopupKind::Flag);
+    }
+
+    #[test]
+    fn destination_completion_lists_and_completes() {
+        let base = std::env::temp_dir().join(format!("hmv-tui-compl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("alpha")).unwrap();
+        std::fs::create_dir_all(base.join("alphabet")).unwrap();
+        std::fs::create_dir_all(base.join("beta")).unwrap();
+        std::fs::write(base.join("file.txt"), "x").unwrap(); // files never complete
+
+        let mut state = app();
+        state.next_tab();
+        state.next_tab();
+        state.next_tab(); // Machines
+        state.open_action_popup(PopupKind::Download);
+        state.popup.as_mut().unwrap().buffers[0] = format!("{}/", base.display());
+
+        // Tab with a trailing separator: lists every directory, input kept.
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.completions, ["alpha", "alphabet", "beta"]);
+        assert_eq!(popup.buffers[0], format!("{}/", base.display()));
+
+        // Partial input completes the shared prefix of the candidates.
+        state.popup.as_mut().unwrap().buffers[0] = format!("{}/al", base.display());
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.buffers[0], format!("{}/alpha", base.display()));
+        assert_eq!(popup.completions, ["alpha", "alphabet"]);
+
+        // Single match: completes fully with the trailing separator.
+        state.popup.as_mut().unwrap().buffers[0] = format!("{}/b", base.display());
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+        );
+        let popup = state.popup.as_ref().unwrap();
+        assert_eq!(popup.buffers[0], format!("{}/beta/", base.display()));
+
+        // Typing clears the stale listing.
+        state.popup.as_mut().unwrap().push('x');
+        assert!(state.popup.as_ref().unwrap().completions.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

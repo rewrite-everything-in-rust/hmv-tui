@@ -426,6 +426,15 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     let fields = popup.buffers.len();
     let height = if fields > 1 { 10 } else { 7 };
     let height = if popup.notice.is_some() { height + 1 } else { height };
+    // Room for the path-completion listing (max 6 candidates + header +
+    // overflow notice).
+    let completion_lines =
+        if popup.kind == PopupKind::Download && !popup.completions.is_empty() {
+            1 + popup.completions.len().min(6) + usize::from(popup.completions.len() > 6)
+        } else {
+            0
+        };
+    let height = height + completion_lines as u16;
     let box_area = popup_area(area, 74, height);
     frame.render_widget(Clear, box_area);
 
@@ -443,7 +452,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         PopupKind::Download => (
             format!(" Download — {} ", popup.vm),
             vec!["Save to:"],
-            "Enter start · Esc cancel",
+            "Tab complete path · Enter start · Esc cancel",
         ),
         PopupKind::Config => (
             " Configure HackMyVM ".to_string(),
@@ -485,6 +494,23 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         }
     }
     lines.push(Line::from(""));
+    // Path-completion listing (Tab in the Download popup), zsh style.
+    if popup.kind == PopupKind::Download && !popup.completions.is_empty() {
+        lines.push(Line::from(Span::styled("  directories:", Style::new().dim())));
+        for name in popup.completions.iter().take(6) {
+            lines.push(Line::from(Span::styled(
+                format!("  {name}"),
+                Style::new().fg(Color::Cyan),
+            )));
+        }
+        let rest = popup.completions.len().saturating_sub(6);
+        if rest > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  … and {rest} more"),
+                Style::new().dim(),
+            )));
+        }
+    }
     lines.push(Line::from(Span::styled(hint, Style::new().dim())));
 
     let block = Block::bordered()

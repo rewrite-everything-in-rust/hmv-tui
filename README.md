@@ -2,6 +2,8 @@
 
 ### HackMyVM Advanced Versatile Operations Toolkit
 
+<p><strong>English</strong> · <a href="README.es.md">Español</a></p>
+
 <p align="center">
   <img src="assets/dashboard-stats.png" alt="HackMyVM dashboard — Stats tab with Nord theme" width="100%">
 </p>
@@ -53,13 +55,13 @@ Grab the archive for your platform from the [Releases](https://github.com/setyan
 
 | Platform | Archive |
 | :--- | :--- |
-| Linux x86_64 | `hmv-v1.0.0-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `hmv-v1.0.0-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `hmv-v1.0.0-x86_64-apple-darwin.tar.gz` |
-| Windows x86_64 | `hmv-v1.0.0-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `hmv-v1.0.1-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `hmv-v1.0.1-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `hmv-v1.0.1-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `hmv-v1.0.1-x86_64-pc-windows-msvc.zip` |
 
 ```bash
-tar xzf hmv-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf hmv-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 install -m 755 hmv ~/.local/bin/hmv
 ```
 
@@ -117,7 +119,7 @@ Five keyboard-driven tabs — `Stats`, `Writeups`, `Pending`, `Machines` and `Re
 | `a` | **Account popup** — shows the active account: `Enter` opens the login popup to switch accounts, `l` logs out, `Esc` closes |
 | `s` | **Machines only** — cycle size sort: site order → smallest first → largest first |
 | `f` | **Machines only** — flag popup with User & Root fields (fill one or both, sent in parallel). Results show in a popup (`✓ ACCEPTED` / `✗ REJECTED` per field); a data refresh runs after you close it. Status-aware: PWNED machines show a read-only "Already PWNED" box, machines with one flag in get a "one remains" notice. |
-| `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified before the file lands. |
+| `d` | **Machines only** — download popup: pick the destination folder (remembered across sessions, zsh-style `Tab` path completion included), MEGA link resolved automatically, streaming download with live progress in the Downloads overlay. MAC-verified before the file lands. |
 | `w` | **Machines & Pending** — community writeups popup for the selected machine: `j`/`k` to select, `Enter` opens the link in your browser, `Esc` closes. |
 | `u` | **Pending only** — submit a writeup URL for the pwned machine (result popup as well). |
 | `o` | Toggle the **Downloads** overlay (live gauges, speed, final paths). Closing it never stops running downloads. |
