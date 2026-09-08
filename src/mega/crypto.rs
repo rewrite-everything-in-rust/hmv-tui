@@ -274,6 +274,7 @@ fn encrypt_block(cipher: &Aes128, block: &mut [u8; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::cipher::BlockModeEncrypt;
 
     #[test]
     fn parses_modern_and_legacy_urls() {
@@ -306,14 +307,23 @@ mod tests {
     }
 
     #[test]
-    fn decrypts_live_mega_attribute_vector() {
-        // redacted.zip from the HackMyVM redirect captured during planning.
-        let keys = derive_file_keys("REDACTED").unwrap();
-        let name = decrypt_attr(
-            "REDACTED",
-            &keys.aes_key,
-        )
-        .unwrap();
-        assert_eq!(name, "redacted.zip");
+    fn decrypts_constructed_attribute_blob() {
+        // Build an attributes blob the way MEGA lays it out:
+        // "MEGA{\"n\":\"test.zip\"}" zero-padded to a 16-byte block multiple,
+        // AES-128-CBC with a zero IV, URL-safe base64 encoded.
+        let key = [7u8; 16];
+        let mut plaintext = b"MEGA{\"n\":\"test.zip\"}".to_vec();
+        plaintext.resize(plaintext.len().div_ceil(16) * 16, 0);
+        let mut encryptor = cbc::Encryptor::<Aes128>::new(
+            &Block::<Aes128>::from(key),
+            &Block::<Aes128>::from([0u8; 16]),
+        );
+        for block in plaintext.as_chunks_mut::<16>().0 {
+            let mut generic: Block<Aes128> = (*block).into();
+            encryptor.encrypt_block(&mut generic);
+            block.copy_from_slice(&generic);
+        }
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&plaintext);
+        assert_eq!(decrypt_attr(&encoded, &key).unwrap(), "test.zip");
     }
 }

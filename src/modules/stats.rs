@@ -186,38 +186,38 @@ mod tests {
 
     const FIXTURE: &str = r#"
     <html><body>
-    <h3 class="pixeltitle nospace profile-username font-weight-bold mb-0 text">demouser<img class="ml-2 mb-2" src="/img/flags/id.svg" width="15px" /> <span class="nospace primary-text-color profile-username font-weight-bold mb-0 text">#38</span></h3>
-    <span class="font-weight-bold h5">[WTF]</span>
-    <span class="rounded font-weight-bold badge badge-light">1767 points</span>
+    <h3 class="pixeltitle nospace profile-username font-weight-bold mb-0 text">demouser<img class="ml-2 mb-2" src="/img/flags/us.svg" width="15px" /> <span class="nospace primary-text-color profile-username font-weight-bold mb-0 text">#42</span></h3>
+    <span class="font-weight-bold h5">[REG]</span>
+    <span class="rounded font-weight-bold badge badge-light">249 points</span>
     <span class="vmtitle">Stats</span>
-    <p class="caz piz">Total Roots: 166</p>
-    <p class="caz piz">Total Users: 166</p>
+    <p class="caz piz">Total Roots: 12</p>
+    <p class="caz piz">Total Users: 12</p>
     <p class="caz piz">FirstRoots: 1</p>
     <p class="caz piz">FirstUsers: 1</p>
-    <p class="caz piz">Challenges: 56</p>
-    <p class="caz piz">Writeups: 125</p>
-    <p class="caz piz"><svg></svg> 9</p>
+    <p class="caz piz">Challenges: 3</p>
+    <p class="caz piz">Writeups: 4</p>
+    <p class="caz piz"><svg></svg> 2</p>
     <h3 class="pixeltitle mt-2">Trophies</h3>
-    <img src="/img/trophies/vfinisher.png" title="vfinisher">
-    <img src="/img/trophies/poet.png" title="poet">
+    <img src="/img/trophies/starter.png" title="starter">
+    <img src="/img/trophies/solver.png" title="solver">
     </body></html>"#;
 
     #[test]
     fn parses_live_profile_fixture() {
         let stats = parse_profile(FIXTURE).unwrap();
         assert_eq!(stats.username, "demouser");
-        assert_eq!(stats.rank.as_deref(), Some("#38"));
-        assert_eq!(stats.country.as_deref(), Some("ID"));
-        assert_eq!(stats.title.as_deref(), Some("[WTF]"));
-        assert_eq!(stats.points, 1767);
-        assert_eq!(stats.roots, 166);
-        assert_eq!(stats.users, 166);
+        assert_eq!(stats.rank.as_deref(), Some("#42"));
+        assert_eq!(stats.country.as_deref(), Some("US"));
+        assert_eq!(stats.title.as_deref(), Some("[REG]"));
+        assert_eq!(stats.points, 249);
+        assert_eq!(stats.roots, 12);
+        assert_eq!(stats.users, 12);
         assert_eq!(stats.first_roots, 1);
         assert_eq!(stats.first_users, 1);
-        assert_eq!(stats.challenges, 56);
-        assert_eq!(stats.writeups, 125);
-        assert_eq!(stats.loved, 9);
-        assert_eq!(stats.trophies, vec!["vfinisher", "poet"]);
+        assert_eq!(stats.challenges, 3);
+        assert_eq!(stats.writeups, 4);
+        assert_eq!(stats.loved, 2);
+        assert_eq!(stats.trophies, vec!["starter", "solver"]);
     }
 
     const WRITEUPS_FIXTURE: &str = r#"
@@ -225,9 +225,9 @@ mod tests {
     <table class="table table-user table-striped table-dark table-hover">
     <thead><tr><th>Vmname</th><th>Link</th></tr></thead>
     <tbody>
-    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Economists">Economists</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/economists/economists.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
-    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Za1">Za1</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/za1/za1.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
-    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Fuxa">Fuxa</a></td><td><a class="download js-scroll-trigger" href="https://github.com/example.com/writeups-archive/blob/main/machines/fuxa/fuxa.md" target="_blank"> Read!</a><br><span class="size"></span></tr>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Economists">Economists</a></td><td><a class="download js-scroll-trigger" href="https://example.com/writeups/economists.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Za1">Za1</a></td><td><a class="download js-scroll-trigger" href="https://example.com/writeups/za1.md" target="_blank"> Read!</a><br><span class="size">English</span></tr>
+    <tr><td><a class="vmtitle" href="https://hackmyvm.eu/machines/machine.php?vm=Fuxa">Fuxa</a></td><td><a class="download js-scroll-trigger" href="https://example.com/writeups/fuxa.md" target="_blank"> Read!</a><br><span class="size"></span></tr>
     </tbody>
     </table>
     </body></html>"#;
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(writeups.len(), 3);
         assert_eq!(writeups[0].vm, "Economists");
         assert_eq!(writeups[0].language, "English");
-        assert!(writeups[0].url.ends_with("economists/economists.md"));
+        assert!(writeups[0].url.ends_with("economists.md"));
         assert_eq!(writeups[1].vm, "Za1");
         assert_eq!(writeups[2].vm, "Fuxa");
         assert!(writeups[2].language.is_empty());

@@ -59,7 +59,7 @@ pub struct Popup {
     pub notice: Option<String>,
     /// Info-only popup: no fields, Enter/Esc just closes it.
     pub readonly: bool,
-    /// Path-completion candidates for the Descarga popup (Tab).
+    /// Path-completion candidates for the Download popup (Tab).
     pub completions: Vec<String>,
 }
 
@@ -118,7 +118,7 @@ impl Popup {
         }
     }
 
-    /// zsh-style destination completion for the Descarga popup: `Tab`
+    /// zsh-style destination completion for the Download popup: `Tab`
     /// expands `~`, completes the last path component against the parent
     /// directory's subdirectories (common prefix first) and stores the
     /// candidate list so the popup can display it.
@@ -295,7 +295,7 @@ pub enum ReportKind {
 }
 
 /// Shown after a flag/writeup action; persists until dismissed. If `changed`
-/// is true, a data refresh is queued for when the user closes it (Opsi A).
+/// is true, a data refresh is queued for when the user closes it (Option A).
 #[derive(Debug, Clone)]
 pub struct ActionReport {
     pub title: String,
@@ -443,7 +443,7 @@ pub struct AppState {
     pub writeups_popup: Option<WriteupsPopup>,
     /// VM whose writeups must be fetched when the event loop goes idle.
     pub pending_writeups: Option<String>,
-    /// Refresh queued for when the report popup closes (Opsi A).
+    /// Refresh queued for when the report popup closes (Option A).
     pub pending_refresh_after_close: bool,
     /// Queue a submissions fetch (`v` popup / refresh on the tab).
     pub pending_submissions: bool,
@@ -528,7 +528,11 @@ impl AppState {
     pub fn unconfigured_with_lang(stored_username: Option<&str>, lang: Lang) -> Self {
         let mut state = Self::new_with_lang(TuiData::empty(), lang);
         state.needs_config = true;
-        let context = if stored_username.is_some() {
+        let context = if stored_username
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .is_some()
+        {
             ConfigContext::LoginFailed
         } else {
             ConfigContext::FirstRun
@@ -1727,6 +1731,7 @@ fn apply_outcome(app: &mut AppState, outcome: HostOutcome, pending_fetch: &mut b
             app.view = ViewMode::Normal;
             app.filter.clear();
             app.set_data(TuiData::empty());
+            app.data.stats.username.clear();
             app.open_config_popup(ConfigContext::LoggedOut, None);
             app.set_status(app.lang.t(Key::StatusLoggedOut));
         }
@@ -1798,7 +1803,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
     }
 
     // Result report popup captures everything until dismissed. Closing it
-    // with `changed` set queues the deferred refresh (Opsi A).
+    // with `changed` set queues the deferred refresh (Option A).
     if app.report.is_some() {
         match key.code {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
@@ -2304,7 +2309,7 @@ mod tests {
         );
         assert!(state.report.is_some());
 
-        // Dismissal queues the deferred refresh (Opsi A).
+        // Dismissal queues the deferred refresh (Option A).
         handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
@@ -2364,7 +2369,7 @@ mod tests {
     #[test]
     fn download_popup_flow_and_gate() {
         let mut state = app();
-        assert_eq!(state.tab, super::Tab::Stats, "tab awal");
+        assert_eq!(state.tab, super::Tab::Stats, "initial tab");
 
         // 'd' is gated to the Machines tab.
         state.next_tab(); // Writeups
@@ -2377,7 +2382,7 @@ mod tests {
         // On Machines it opens with a destination field.
         state.next_tab(); // Pending
         state.next_tab(); // Machines
-        assert_eq!(state.tab, super::Tab::Machines, "sebelum d");
+        assert_eq!(state.tab, super::Tab::Machines, "before d");
         handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()),

@@ -4,25 +4,11 @@
 
 <p><a href="README.md">English</a> · <strong>Español</strong></p>
 
-<p align="center">
-  <img src="assets/dashboard-stats.png" alt="Dashboard de HackMyVM — pestaña Stats con tema Nord" width="100%">
-</p>
-
 **HMV-TUI** es un dashboard interactivo para tu terminal de la comunidad de [HackMyVM](https://hackmyvm.eu): explora el catálogo de máquinas, descarga VMs directamente de MEGA, envía flags, lee writeups de la comunidad y publica los tuyos — todo sin salir de la terminal.
 
 Un comando, una pantalla: ejecutar `hmv` abre el dashboard. Escrito en **Rust** puro, distribuido como un binario estático sin dependencias en tiempo de ejecución.
 
 > **v1.0.1** — HMV-TUI es solo dashboard. Los subcomandos clásicos de la CLI fueron eliminados; todo vive en el dashboard, incluida la gestión de la cuenta (primer arranque, cambio de cuenta, cierre de sesión).
-
----
-
-## Capturas
-
-| Stats | Machines |
-| :---: | :---: |
-| ![Pestaña Stats](assets/dashboard-stats.png) | ![Pestaña Machines](assets/dashboard-machines.png) |
-
-Interfaz con tema Nord, dificultades con colores, medidores de progreso en vivo y un menú de cuenta (`a`) para iniciar sesión, cambiar de cuenta y cerrar sesión.
 
 ---
 
