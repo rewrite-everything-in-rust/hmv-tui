@@ -127,7 +127,11 @@ pub fn parse_profile(html: &str) -> Result<ProfileStats> {
             }
         } else {
             // Heart-eyes emoji line holds only the "loved" count.
-            stats.loved = line.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            stats.loved = line
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
         }
     }
 

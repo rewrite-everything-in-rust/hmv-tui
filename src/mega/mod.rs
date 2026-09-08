@@ -34,7 +34,11 @@ pub struct DownloadHooks<'a> {
 }
 
 /// Downloads and decrypts a public MEGA file, reporting through `hooks`.
-pub async fn download_public(url: &str, destination: &Path, hooks: &DownloadHooks<'_>) -> Result<PathBuf> {
+pub async fn download_public(
+    url: &str,
+    destination: &Path,
+    hooks: &DownloadHooks<'_>,
+) -> Result<PathBuf> {
     let (file, keys) = fetch_public_file(url).await?;
     (hooks.on_metadata)(file.size, &file.name);
 
@@ -181,7 +185,10 @@ async fn stream_to_file(
     }
 
     if written != info.size {
-        bail!("Incomplete MEGA download: received {written} of {} bytes", info.size);
+        bail!(
+            "Incomplete MEGA download: received {written} of {} bytes",
+            info.size
+        );
     }
     mac.verify()?;
     file.flush().await?;

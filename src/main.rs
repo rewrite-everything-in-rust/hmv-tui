@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod download;
+mod i18n;
 mod mega;
 mod modules;
 mod tui;

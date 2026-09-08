@@ -6,17 +6,18 @@ pub mod render;
 
 pub mod downloads;
 
-
 use std::time::Duration;
 
 use anyhow::Result;
-use std::path::PathBuf;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use std::path::PathBuf;
 
+use crate::i18n::{Key, Lang};
 use crate::modules::flag::FlagVerdict;
 use crate::modules::machines::Machine;
 use crate::modules::releases::Release;
 use crate::modules::stats::{ProfileStats, ProfileWriteup};
+use crate::modules::submissions::{FieldKind, FormField, QueueEntry};
 use crate::modules::writeups::Writeup;
 
 /// What a popup asks the user for.
@@ -30,6 +31,10 @@ pub enum PopupKind {
     /// Account overview popup (`a`): shows the active account with actions
     /// to switch (`Enter`) or logout (`l`).
     Account,
+    /// Submit-your-VM form (`v` on the Submissions tab).
+    SubmissionForm,
+    /// Submission rules viewer (`i` on the Submissions tab).
+    Rules,
 }
 
 /// Why the credentials popup was opened — drives its yellow notice line.
@@ -59,6 +64,33 @@ pub struct Popup {
 }
 
 impl Popup {
+    /// Select-field helper: moves the active buffer through `values`.
+    /// Forward = next value; backward = previous (wraps both ways).
+    pub fn cycle_value_step(&mut self, values: &[String], forward: bool) {
+        if values.is_empty() {
+            return;
+        }
+        if let Some(buffer) = self.buffers.get_mut(self.field) {
+            let next = match values.iter().position(|v| v == buffer) {
+                Some(i) => {
+                    if forward {
+                        (i + 1) % values.len()
+                    } else {
+                        (i + values.len() - 1) % values.len()
+                    }
+                }
+                None => {
+                    if forward {
+                        0
+                    } else {
+                        values.len() - 1
+                    }
+                }
+            };
+            *buffer = values[next].clone();
+        }
+    }
+
     pub fn push(&mut self, c: char) {
         if let Some(buffer) = self.buffers.get_mut(self.field) {
             buffer.push(c);
@@ -180,6 +212,34 @@ fn common_prefix(items: &[String]) -> String {
     prefix
 }
 
+/// Result of one background host operation, delivered to the event loop
+/// via an mpsc channel.
+pub enum HostOutcome {
+    Fetched(Box<Result<TuiData>>),
+    Actioned(Result<ActionReport>),
+    Writeups {
+        vm: String,
+        result: Result<Vec<Writeup>>,
+    },
+    Configured {
+        username: String,
+        result: Result<()>,
+    },
+    LoggedOut(Result<()>),
+    Submissions {
+        result: Result<(Vec<QueueEntry>, Option<String>, Vec<FormField>)>,
+    },
+}
+
+/// Identifies the selected row of one tab so `set_data` can restore the
+enum SelectionKey {
+    Machine(String),
+    Pending(String),
+    Writeup { vm: String, url: String },
+    Release(String),
+    Submission { name: String, user: String },
+}
+
 /// A user action queued from a popup, executed by the host application.
 /// `values` carries `(original field index, value)` so verdicts can be
 /// labeled with the field they came from (User flag / Root flag); uploads
@@ -202,6 +262,12 @@ pub struct TuiData {
     pub catalog: Vec<Machine>,
     /// Upcoming machine release schedule (Releases tab).
     pub releases: Vec<Release>,
+    /// Submission queue (Submissions tab): every user's submitted VMs.
+    pub submissions: Vec<QueueEntry>,
+    /// Scraped submit-form fields (cached for the submit popup).
+    pub submission_form: Vec<FormField>,
+    /// Submission rules text (Submissions tab info popup).
+    pub rules: Option<String>,
 }
 
 impl TuiData {
@@ -213,6 +279,9 @@ impl TuiData {
             pending: Vec::new(),
             catalog: Vec::new(),
             releases: Vec::new(),
+            submissions: Vec::new(),
+            submission_form: Vec::new(),
+            rules: None,
         }
     }
 }
@@ -248,10 +317,7 @@ pub struct WriteupsPopup {
 impl WriteupsPopup {
     pub fn move_selection(&mut self, delta: isize) {
         let last = self.entries.len().saturating_sub(1);
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(last);
+        self.selected = self.selected.saturating_add_signed(delta).min(last);
     }
 
     pub fn selected_url(&self) -> Option<&str> {
@@ -266,26 +332,18 @@ pub enum Tab {
     Pending,
     Machines,
     Releases,
+    Submissions,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Stats,
         Tab::Writeups,
         Tab::Pending,
         Tab::Machines,
         Tab::Releases,
+        Tab::Submissions,
     ];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Stats => "Stats",
-            Tab::Writeups => "Writeups",
-            Tab::Pending => "Pending",
-            Tab::Machines => "Machines",
-            Tab::Releases => "Releases",
-        }
-    }
 
     fn next(self) -> Self {
         let index = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
@@ -355,10 +413,14 @@ pub struct AppState {
     pub download_jobs: Vec<std::sync::Arc<downloads::DownloadJob>>,
     /// First `q` with active downloads only sets this; second quits.
     pub quit_warned: bool,
+    /// UI language (EN/ES), switched with `l`, persisted in the config.
+    pub lang: Lang,
     pub filter: String,
     pub selected: usize,
     /// Sort order of the Machines tab (cycled with `s`).
     pub machine_sort: MachineSort,
+    /// Machines whose status is PWNED are hidden on the Machines tab (`h`).
+    pub hide_pwned: bool,
     /// First visible row for the active list (manual scrolling window).
     pub scroll: usize,
     pub quit: bool,
@@ -383,6 +445,8 @@ pub struct AppState {
     pub pending_writeups: Option<String>,
     /// Refresh queued for when the report popup closes (Opsi A).
     pub pending_refresh_after_close: bool,
+    /// Queue a submissions fetch (`v` popup / refresh on the tab).
+    pub pending_submissions: bool,
     pub data: TuiData,
     /// Row budget reported by the renderer after layout.
     pub last_visible_rows: Option<usize>,
@@ -391,8 +455,25 @@ pub struct AppState {
 /// How long a status message stays visible in the footer.
 const STATUS_LIFETIME: Duration = Duration::from_secs(5);
 
+/// Substitutes the `{}` placeholders of a translated template with `args`
+/// in order; extra placeholders stay as `{}` (never a panic, unlike
+/// `format!` with a non-literal template).
+pub fn fmt_key(template: &str, args: &[&str]) -> String {
+    let mut out = template.to_string();
+    for arg in args {
+        out = out.replacen("{}", arg, 1);
+    }
+    out
+}
+
 impl AppState {
+    #[cfg(test)]
     pub fn new(data: TuiData) -> Self {
+        Self::new_with_lang(data, Lang::En)
+    }
+
+    /// Same as [`new`](Self::new) but with the persisted UI language.
+    pub fn new_with_lang(data: TuiData, lang: Lang) -> Self {
         Self {
             tab: Tab::Stats,
             input_mode: InputMode::Normal,
@@ -401,7 +482,9 @@ impl AppState {
             pending_logout: false,
             download_jobs: Vec::new(),
             quit_warned: false,
+            lang,
             filter: String::new(),
+            hide_pwned: false,
             selected: 0,
             machine_sort: MachineSort::default(),
             scroll: 0,
@@ -417,22 +500,33 @@ impl AppState {
             writeups_popup: None,
             pending_writeups: None,
             pending_refresh_after_close: false,
+            pending_submissions: false,
             data,
             last_visible_rows: None,
         }
     }
 
     /// Entry state for `hmv tui`: draws immediately, then loads all data.
-    pub fn loading() -> Self {
-        let mut state = Self::new(TuiData::empty());
-        state.fetching = Some("Loading data...".to_string());
+    pub fn loading_with_lang(lang: Lang) -> Self {
+        let mut state = Self::new_with_lang(TuiData::empty(), lang);
+        state.fetching = Some(state.lang.t(Key::FetchingLoading).to_string());
         state
+    }
+
+    #[cfg(test)]
+    pub fn loading() -> Self {
+        Self::loading_with_lang(Lang::En)
     }
 
     /// Entry state for bare `hmv` with no usable stored credentials: opens
     /// straight into the configuration popup.
+    #[cfg(test)]
     pub fn unconfigured(stored_username: Option<&str>) -> Self {
-        let mut state = Self::new(TuiData::empty());
+        Self::unconfigured_with_lang(stored_username, Lang::En)
+    }
+
+    pub fn unconfigured_with_lang(stored_username: Option<&str>, lang: Lang) -> Self {
+        let mut state = Self::new_with_lang(TuiData::empty(), lang);
         state.needs_config = true;
         let context = if stored_username.is_some() {
             ConfigContext::LoginFailed
@@ -445,7 +539,10 @@ impl AppState {
 
     /// Number of background downloads still running.
     pub fn active_downloads(&self) -> usize {
-        self.download_jobs.iter().filter(|job| job.is_active()).count()
+        self.download_jobs
+            .iter()
+            .filter(|job| job.is_active())
+            .count()
     }
 
     /// Toggles the downloads overlay; harmless while popups are open.
@@ -486,9 +583,9 @@ impl AppState {
                     format!("↓ {}{pct}", job.vm)
                 })
                 .collect();
-            self.set_status(format!(
-                "{active} download active — press q again to abort: {}",
-                jobs.join(" · ")
+            self.set_status(fmt_key(
+                self.lang.t(Key::QuitWarnDownloads),
+                &[&active.to_string(), &jobs.join(" · ")],
             ));
             return;
         }
@@ -511,10 +608,75 @@ impl AppState {
         }
     }
 
+    /// Replaces the dashboard data. The list selection survives refreshes:
+    /// the selected row is identified by its key (machine name / VM / URL /
+    /// release name) and looked up again in the new data; a missing key
+    /// falls back to the top of the list.
     pub fn set_data(&mut self, data: TuiData) {
+        let selected_key = self.selection_key();
         self.data = data;
-        self.selected = 0;
+        self.selected = selected_key
+            .and_then(|key| self.find_restored_index(&key))
+            .unwrap_or(0);
         self.scroll = 0;
+        self.ensure_selected_visible();
+    }
+
+    /// Identifies the row under the selection on the active tab, if any.
+    fn selection_key(&self) -> Option<SelectionKey> {
+        match self.tab {
+            Tab::Machines => self
+                .visible_machines()
+                .get(self.selected)
+                .map(|m| SelectionKey::Machine(m.name.clone())),
+            Tab::Pending => self
+                .visible_pending()
+                .get(self.selected)
+                .map(|vm| SelectionKey::Pending((*vm).clone())),
+            Tab::Writeups => {
+                self.visible_writeups()
+                    .get(self.selected)
+                    .map(|w| SelectionKey::Writeup {
+                        vm: w.vm.clone(),
+                        url: w.url.clone(),
+                    })
+            }
+            Tab::Releases => self
+                .visible_releases()
+                .get(self.selected)
+                .map(|r| SelectionKey::Release(r.name.clone())),
+            Tab::Submissions => {
+                self.visible_submissions()
+                    .get(self.selected)
+                    .map(|e| SelectionKey::Submission {
+                        name: e.name.clone(),
+                        user: e.user.clone(),
+                    })
+            }
+            Tab::Stats => None,
+        }
+    }
+
+    /// Index of the selection key in the freshly set data (same filters as
+    /// the capture pass, since the filter did not change between the two).
+    fn find_restored_index(&self, key: &SelectionKey) -> Option<usize> {
+        match key {
+            SelectionKey::Machine(name) => {
+                self.visible_machines().iter().position(|m| &m.name == name)
+            }
+            SelectionKey::Pending(vm) => self.visible_pending().iter().position(|v| *v == vm),
+            SelectionKey::Writeup { vm, url } => self
+                .visible_writeups()
+                .iter()
+                .position(|w| &w.vm == vm && &w.url == url),
+            SelectionKey::Release(name) => {
+                self.visible_releases().iter().position(|r| &r.name == name)
+            }
+            SelectionKey::Submission { name, user } => self
+                .visible_submissions()
+                .iter()
+                .position(|e| &e.name == name && &e.user == user),
+        }
     }
 
     pub fn next_tab(&mut self) {
@@ -559,7 +721,8 @@ impl AppState {
     }
 
     /// Lowercase-filtered machine catalog for the Machines tab. Filter
-    /// matches name, difficulty, creator or status; `machine_sort` orders
+    /// matches name, difficulty, creator or status; fully-PWNED machines
+    /// are dropped while `hide_pwned` is set (`h`); `machine_sort` orders
     /// the result by size (smallest/largest) or keeps the site order.
     pub fn visible_machines(&self) -> Vec<&Machine> {
         let needle = self.filter.to_lowercase();
@@ -568,6 +731,9 @@ impl AppState {
             .catalog
             .iter()
             .filter(|m| {
+                if self.hide_pwned && m.status.to_uppercase().contains("PWNED") {
+                    return false;
+                }
                 needle.is_empty()
                     || m.name.to_lowercase().contains(&needle)
                     || m.difficulty.to_lowercase().contains(&needle)
@@ -591,15 +757,60 @@ impl AppState {
         machines
     }
 
+    /// Toggles hiding fully-PWNED machines on the Machines tab. Gated to
+    /// that tab like the other machine actions.
+    pub fn toggle_hide_pwned(&mut self) {
+        if self.tab != Tab::Machines {
+            self.set_status(self.lang.t(Key::StatusHidePwnedOnly));
+            return;
+        }
+        self.hide_pwned = !self.hide_pwned;
+        self.reset_list_position();
+        let key = if self.hide_pwned {
+            Key::StatusPwnedHidden
+        } else {
+            Key::StatusPwnedShown
+        };
+        self.set_status(self.lang.t(key));
+    }
+
+    /// Switches the UI language (EN ↔ ES) and persists the choice.
+    pub fn toggle_language(&mut self) {
+        self.lang = self.lang.other();
+        // Persistence is best-effort: the switch applies to this session
+        // even if the config file cannot be written.
+        let _ = crate::config::ConfigManager::new().save_language(self.lang);
+        self.set_status(fmt_key(
+            self.lang.t(Key::StatusLangSwitched),
+            &[self.lang.label()],
+        ));
+    }
+
     /// Cycles the Machines-tab size sort: site order -> smallest -> largest.
     /// Gated to the Machines tab like the other actions.
     pub fn cycle_machine_sort(&mut self) {
         if self.tab != Tab::Machines {
-            self.set_status("Size sort is only available on the Machines tab.");
+            self.set_status(self.lang.t(Key::StatusSortOnly));
             return;
         }
         self.machine_sort = self.machine_sort.next();
         self.reset_list_position();
+    }
+
+    /// Submission queue rows for the Submissions tab (filter on name,
+    /// user or status).
+    pub fn visible_submissions(&self) -> Vec<&QueueEntry> {
+        let needle = self.filter.to_lowercase();
+        self.data
+            .submissions
+            .iter()
+            .filter(|e| {
+                needle.is_empty()
+                    || e.name.to_lowercase().contains(&needle)
+                    || e.user.to_lowercase().contains(&needle)
+                    || e.status.to_lowercase().contains(&needle)
+            })
+            .collect()
     }
 
     /// Filtered release schedule for the Releases tab (date, name, os).
@@ -651,6 +862,10 @@ impl AppState {
     /// status-aware: PWNED machines get a read-only info box, DONE ones a
     /// "one flag remains" notice.
     pub fn open_action_popup(&mut self, kind: PopupKind) {
+        if self.fetching.is_some() {
+            self.set_status(self.lang.t(Key::StatusBusy));
+            return;
+        }
         if self.popup.is_some() {
             return;
         }
@@ -662,25 +877,23 @@ impl AppState {
         let allowed = match kind {
             PopupKind::Flag | PopupKind::Download => self.tab == Tab::Machines,
             PopupKind::Upload => self.tab == Tab::Pending,
+            PopupKind::SubmissionForm | PopupKind::Rules => self.tab == Tab::Submissions,
             PopupKind::Config | PopupKind::Account => false, // managed elsewhere
         };
         if !allowed {
             self.set_status(match kind {
-                PopupKind::Flag => {
-                    "Flag submission is only available on the Machines tab."
-                }
-                PopupKind::Upload => {
-                    "Writeup submission is only available on the Pending tab."
-                }
-                PopupKind::Download => {
-                    "Downloads are only available on the Machines tab."
+                PopupKind::Flag => self.lang.t(Key::StatusFlagOnlyMachines),
+                PopupKind::Upload => self.lang.t(Key::StatusUploadOnlyPending),
+                PopupKind::Download => self.lang.t(Key::StatusDownloadOnlyMachines),
+                PopupKind::SubmissionForm | PopupKind::Rules => {
+                    self.lang.t(Key::StatusSubmitOnlySubmissions)
                 }
                 PopupKind::Config | PopupKind::Account => return, // never opened ad hoc
             });
             return;
         }
         let Some(vm) = self.selected_machine_name() else {
-            self.set_status("Nothing selected to act on.");
+            self.set_status(self.lang.t(Key::StatusNothingSelected));
             return;
         };
 
@@ -698,12 +911,12 @@ impl AppState {
                     field: 0,
                     notice: None,
                     readonly: true,
-            completions: Vec::new(),
+                    completions: Vec::new(),
                 });
                 return;
             }
             let notice = if status.contains("DONE") {
-                Some("One flag already submitted — one remains.".to_string())
+                Some(self.lang.t(Key::NoticeOneFlagRemains).to_string())
             } else {
                 None
             };
@@ -714,7 +927,7 @@ impl AppState {
                 field: 0,
                 notice,
                 readonly: false,
-            completions: Vec::new(),
+                completions: Vec::new(),
             });
             return;
         }
@@ -731,7 +944,7 @@ impl AppState {
                 field: 0,
                 notice: None,
                 readonly: false,
-            completions: Vec::new(),
+                completions: Vec::new(),
             });
             return;
         }
@@ -754,10 +967,10 @@ impl AppState {
             return;
         }
         let notice = match context {
-            ConfigContext::FirstRun => "First run — enter your HackMyVM account.",
-            ConfigContext::LoginFailed => "Login failed — re-enter your HackMyVM credentials.",
-            ConfigContext::Switch => "Switch account — enter the new credentials.",
-            ConfigContext::LoggedOut => "Logged out — sign in with your HackMyVM account.",
+            ConfigContext::FirstRun => self.lang.t(Key::NoticeFirstRun),
+            ConfigContext::LoginFailed => self.lang.t(Key::NoticeLoginFailed),
+            ConfigContext::Switch => self.lang.t(Key::NoticeSwitch),
+            ConfigContext::LoggedOut => self.lang.t(Key::NoticeLoggedOut),
         };
         self.popup = Some(Popup {
             kind: PopupKind::Config,
@@ -774,6 +987,10 @@ impl AppState {
     /// logged-in account with actions to switch (`Enter`) or logout (`l`).
     /// The username rides in `Popup::vm` for the renderer.
     pub fn open_account_popup(&mut self) {
+        if self.fetching.is_some() {
+            self.set_status(self.lang.t(Key::StatusBusy));
+            return;
+        }
         if self.needs_config
             || self.popup.is_some()
             || self.report.is_some()
@@ -802,19 +1019,84 @@ impl AppState {
         self.open_config_popup(ConfigContext::Switch, Some(&username));
     }
 
+    /// Opens the submit-your-VM popup built from the cached scraped form
+    /// fields. Gated to the Submissions tab.
+    pub fn open_submission_form(&mut self) {
+        if self.fetching.is_some() {
+            self.set_status(self.lang.t(Key::StatusBusy));
+            return;
+        }
+        if self.popup.is_some() || self.report.is_some() {
+            return;
+        }
+        if self.tab != Tab::Submissions {
+            self.set_status(self.lang.t(Key::StatusSubmitOnlySubmissions));
+            return;
+        }
+        if self.data.submission_form.is_empty() {
+            self.set_status(self.lang.t(Key::FetchingForm));
+            self.pending_submissions = true;
+            return;
+        }
+        let buffers = self
+            .data
+            .submission_form
+            .iter()
+            .map(|f| f.value.clone())
+            .collect();
+        self.popup = Some(Popup {
+            kind: PopupKind::SubmissionForm,
+            vm: String::new(),
+            buffers,
+            field: 0,
+            notice: Some(self.lang.t(Key::SubmitFormNotice).to_string()),
+            readonly: false,
+            completions: Vec::new(),
+        });
+    }
+
+    /// Opens the rules popup with the cached rules text.
+    pub fn open_rules_popup(&mut self) {
+        if self.popup.is_some() || self.report.is_some() {
+            return;
+        }
+        if self.tab != Tab::Submissions {
+            self.set_status(self.lang.t(Key::StatusSubmitOnlySubmissions));
+            return;
+        }
+        let text = self
+            .data
+            .rules
+            .clone()
+            .unwrap_or_else(|| self.lang.t(Key::RulesUnavailable).to_string());
+        self.popup = Some(Popup {
+            kind: PopupKind::Rules,
+            vm: String::new(),
+            buffers: vec![text],
+            field: 0,
+            notice: None,
+            readonly: true,
+            completions: Vec::new(),
+        });
+    }
+
     /// Queues a writeups fetch for the selected machine; the event loop
     /// runs the (blocking) fetch, then opens the popup. Gated to the
     /// Machines and Pending tabs.
     pub fn open_writeups_popup(&mut self) {
+        if self.fetching.is_some() {
+            self.set_status(self.lang.t(Key::StatusBusy));
+            return;
+        }
         if self.writeups_popup.is_some() || self.popup.is_some() || self.report.is_some() {
             return;
         }
         if !matches!(self.tab, Tab::Machines | Tab::Pending) {
-            self.set_status("Writeups are available on the Machines and Pending tabs.");
+            self.set_status(self.lang.t(Key::StatusWriteupsTabs));
             return;
         }
         let Some(vm) = self.selected_machine_name() else {
-            self.set_status("Nothing selected to inspect.");
+            self.set_status(self.lang.t(Key::StatusNothingToInspect));
             return;
         };
         self.pending_writeups = Some(vm);
@@ -834,8 +1116,8 @@ impl AppState {
             .stderr(std::process::Stdio::null())
             .spawn();
         self.set_status(match opened {
-            Ok(_) => format!("Opened in browser: {url}"),
-            Err(error) => format!("xdg-open failed: {error}"),
+            Ok(_) => fmt_key(self.lang.t(Key::StatusOpenedBrowser), &[url]),
+            Err(error) => fmt_key(self.lang.t(Key::StatusXdgOpenFailed), &[&error.to_string()]),
         });
     }
 
@@ -853,7 +1135,7 @@ impl AppState {
             return;
         };
         if popup.readonly {
-            self.set_status(format!("{} is already PWNED — nothing to submit.", popup.vm));
+            self.set_status(fmt_key(self.lang.t(Key::StatusAlreadyPwned), &[&popup.vm]));
             return;
         }
         let values: Vec<(usize, String)> = popup
@@ -867,10 +1149,10 @@ impl AppState {
         if popup.kind == PopupKind::Config {
             if values.len() < 2 {
                 self.popup = Some(popup);
-                self.set_status("Username and password are required.");
+                self.set_status(self.lang.t(Key::StatusCredentialsRequired));
                 return;
             }
-            self.set_status("Connecting...");
+            self.set_status(self.lang.t(Key::StatusConnecting));
             self.pending_action = Some(TuiAction {
                 kind: popup.kind,
                 vm: popup.vm,
@@ -880,7 +1162,44 @@ impl AppState {
         }
 
         if values.is_empty() {
-            self.set_status("Cancelled — empty input.");
+            self.set_status(self.lang.t(Key::StatusEmptyInput));
+            return;
+        }
+        if popup.kind == PopupKind::SubmissionForm {
+            // Validate every required scraped field + the level value.
+            let mut missing: Vec<String> = Vec::new();
+            let mut level_ok = true;
+            for (index, field) in self.data.submission_form.iter().enumerate() {
+                let value = popup.buffers.get(index).cloned().unwrap_or_default();
+                let empty = value.trim().is_empty();
+                if field.required && empty {
+                    missing.push(field.name.clone());
+                }
+                if let FieldKind::Select(options) = &field.kind {
+                    if !empty && !options.iter().any(|o| o.eq_ignore_ascii_case(value.trim())) {
+                        level_ok = false;
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                self.popup = Some(popup);
+                self.set_status(fmt_key(
+                    self.lang.t(Key::SubmitRequiredMissing),
+                    &[&missing.join(", ")],
+                ));
+                return;
+            }
+            if !level_ok {
+                self.popup = Some(popup);
+                self.set_status(self.lang.t(Key::SubmitInvalidLevel));
+                return;
+            }
+            self.set_status(self.lang.t(Key::SubmitOk));
+            self.pending_action = Some(TuiAction {
+                kind: popup.kind,
+                vm: popup.vm,
+                values,
+            });
             return;
         }
 
@@ -891,34 +1210,28 @@ impl AppState {
                 let vm = popup.vm.clone();
                 self.download_queue
                     .push_back((popup.vm, PathBuf::from(values[0].1.clone())));
-                self.set_status(format!(
-                    "[↓] {vm} queued — {} downloads active.",
-                    downloads::PARALLEL_DOWNLOADS
+                self.set_status(fmt_key(
+                    self.lang.t(Key::StatusDownloadQueued),
+                    &[&vm, &downloads::PARALLEL_DOWNLOADS.to_string()],
                 ));
                 return;
             }
-            self.pending_action = Some(TuiAction {
-                kind: popup.kind,
-                vm: popup.vm,
-                values,
-            });
-            return;
         }
 
-        let kind_label = match popup.kind {
+        let status_key = match popup.kind {
             PopupKind::Flag => {
                 if values.len() > 1 {
-                    "flags"
+                    Key::StatusQueuedFlags
                 } else {
-                    "flag"
+                    Key::StatusQueuedFlag
                 }
             }
-            PopupKind::Upload => "writeup URL",
-            PopupKind::Download => "download",
-            PopupKind::Config => "credentials", // handled above
-            PopupKind::Account => "account",    // handled above
+            PopupKind::Upload => Key::StatusQueuedWriteup,
+            PopupKind::Download => Key::StatusQueuedDownload,
+            PopupKind::Config | PopupKind::Account => unreachable!("handled above"),
+            PopupKind::SubmissionForm | PopupKind::Rules => unreachable!("handled above"),
         };
-        self.set_status(format!("Queued {} for {}...", kind_label, popup.vm));
+        self.set_status(fmt_key(self.lang.t(status_key), &[&popup.vm]));
         self.pending_action = Some(TuiAction {
             kind: popup.kind,
             vm: popup.vm,
@@ -933,6 +1246,7 @@ impl AppState {
             Tab::Pending => self.visible_pending().len(),
             Tab::Machines => self.visible_machines().len(),
             Tab::Releases => self.visible_releases().len(),
+            Tab::Submissions => self.visible_submissions().len(),
         }
     }
 
@@ -1010,8 +1324,8 @@ impl AppState {
                 .stderr(std::process::Stdio::null())
                 .spawn();
             self.set_status(match opened {
-                Ok(_) => format!("Opened in browser: {url}"),
-                Err(error) => format!("xdg-open failed: {error}"),
+                Ok(_) => fmt_key(self.lang.t(Key::StatusOpenedBrowser), &[url]),
+                Err(error) => fmt_key(self.lang.t(Key::StatusXdgOpenFailed), &[&error.to_string()]),
             });
         }
     }
@@ -1035,100 +1349,149 @@ impl AppState {
 /// Builds the result popup for a flag submission. Verdicts are labeled with
 /// the field they were typed into (User flag / Root flag) — the API does not
 /// expose the flag level. A lone accepted flag keeps the celebratory footer.
-pub fn build_flag_report(vm: &str, results: Vec<(usize, FlagVerdict)>) -> ActionReport {
+pub fn build_flag_report(lang: Lang, vm: &str, results: Vec<(usize, FlagVerdict)>) -> ActionReport {
     let mut entries = Vec::new();
     let mut compact = Vec::new();
     let mut changed = false;
 
     for (field, verdict) in results {
-        let label = if field == 0 { "User flag" } else { "Root flag" };
-        let short = if field == 0 { "User" } else { "Root" };
+        let key = if field == 0 {
+            Key::PopupUserFlag
+        } else {
+            Key::PopupRootFlag
+        };
+        let label = lang.t(key).trim_end_matches(':');
+        let short = if field == 0 {
+            lang.t(Key::CompactUser)
+        } else {
+            lang.t(Key::CompactRoot)
+        };
         match verdict {
             FlagVerdict::Correct => {
-                entries.push((ReportKind::Success, format!("{label}: ✓ ACCEPTED")));
+                entries.push((
+                    ReportKind::Success,
+                    fmt_key(lang.t(Key::ReportFlagAccepted), &[label]),
+                ));
                 compact.push(format!("{short} ✓"));
                 changed = true;
             }
             FlagVerdict::Wrong => {
-                entries.push((ReportKind::Failure, format!("{label}: ✗ REJECTED")));
+                entries.push((
+                    ReportKind::Failure,
+                    fmt_key(lang.t(Key::ReportFlagRejected), &[label]),
+                ));
                 compact.push(format!("{short} ✗"));
             }
             FlagVerdict::MachineNotFound => {
-                entries.push((ReportKind::Failure, format!("Machine '{vm}' not found")));
-                compact.push("machine not found".to_string());
+                entries.push((
+                    ReportKind::Failure,
+                    fmt_key(lang.t(Key::ReportMachineNotFound), &[vm]),
+                ));
+                compact.push(lang.t(Key::CompactMachineNotFound).to_string());
             }
             FlagVerdict::Unknown(body) => {
                 let body: String = body.chars().take(60).collect();
-                entries.push((ReportKind::Info, format!("Unknown response: {body}")));
-                compact.push("unknown".to_string());
+                entries.push((
+                    ReportKind::Info,
+                    fmt_key(lang.t(Key::ReportUnknownResponse), &[&body]),
+                ));
+                compact.push(lang.t(Key::CompactUnknown).to_string());
             }
         }
     }
 
     let status = if entries.len() == 1 && changed {
-        format!("[✓] You hacked {vm}!")
+        fmt_key(lang.t(Key::ReportYouHacked), &[vm])
     } else {
         let marker = if changed { "+" } else { "!" };
         format!("[{marker}] {}", compact.join(" · "))
     };
 
     ActionReport {
-        title: format!(" Flag results — {vm} "),
         entries,
+        title: fmt_key(lang.t(Key::FlagResultsTitle), &[vm]),
         changed,
         status,
     }
 }
 
-/// Runs the TUI until the user quits. `refetch` rebuilds `TuiData` on
-/// demand; `run_action` executes a user action (flag/upload) and returns an
-/// `ActionReport` for the result popup; `run_writeups_fetch` fetches the
-/// community writeups for a machine (blocking, network-only);
-/// `run_config` validates and stores credentials; `logout` removes them.
-pub fn run(
-    mut app: AppState,
-    refetch: impl Fn() -> Result<TuiData>,
-    run_action: impl Fn(TuiAction) -> Result<ActionReport>,
-    run_writeups_fetch: impl Fn(&str) -> Result<Vec<Writeup>>,
-    run_config: impl Fn(&str, &str) -> Result<()>,
-    logout: impl Fn() -> Result<()>,
-) -> Result<()> {
-    let mut terminal = ratatui::init();
-    // Kick off the first load (and any pending request) before looping.
-    let mut pending_fetch = app.fetching.is_some();
-    let mut host = Host {
-        refetch: &refetch,
-        run_action: &run_action,
-        run_writeups_fetch: &run_writeups_fetch,
-        run_config: &run_config,
-        logout: &logout,
-        pending_fetch: &mut pending_fetch,
-    };
-    let result = event_loop(&mut terminal, &mut app, &mut host);
-    ratatui::restore();
-    result
+type RefetchFn = std::sync::Arc<dyn Fn() -> Result<TuiData> + Send + Sync>;
+type RunActionFn = std::sync::Arc<dyn Fn(TuiAction) -> Result<ActionReport> + Send + Sync>;
+type WriteupsFn = std::sync::Arc<dyn Fn(&str) -> Result<Vec<Writeup>> + Send + Sync>;
+type ConfigFn = std::sync::Arc<dyn Fn(&str, &str) -> Result<()> + Send + Sync>;
+type LogoutFn = std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>;
+/// Fetches (queue, rules, submit-form fields) in one background call.
+type SubmissionsFn = std::sync::Arc<
+    dyn Fn() -> Result<(Vec<QueueEntry>, Option<String>, Vec<FormField>)> + Send + Sync,
+>;
+
+/// Host-provided callbacks the event loop spawns on background threads.
+/// Each closure lives in its own Arc so a spawn clones one cheap handle.
+struct HostOps {
+    refetch: RefetchFn,
+    run_action: RunActionFn,
+    run_writeups_fetch: WriteupsFn,
+    run_config: ConfigFn,
+    logout: LogoutFn,
+    fetch_submissions: SubmissionsFn,
 }
 
-/// Host-provided callbacks the event loop calls synchronously (blocking the
-/// render thread for the duration of the network call).
-struct Host<'a> {
-    refetch: &'a dyn Fn() -> Result<TuiData>,
-    run_action: &'a dyn Fn(TuiAction) -> Result<ActionReport>,
-    run_writeups_fetch: &'a dyn Fn(&str) -> Result<Vec<Writeup>>,
-    run_config: &'a dyn Fn(&str, &str) -> Result<()>,
-    logout: &'a dyn Fn() -> Result<()>,
-    /// Set when the next loop iteration must (re)fetch all data.
-    pending_fetch: &'a mut bool,
+pub fn run(
+    mut app: AppState,
+    refetch: impl Fn() -> Result<TuiData> + Send + Sync + 'static,
+    run_action: impl Fn(TuiAction) -> Result<ActionReport> + Send + Sync + 'static,
+    run_writeups_fetch: impl Fn(&str) -> Result<Vec<Writeup>> + Send + Sync + 'static,
+    run_config: impl Fn(&str, &str) -> Result<()> + Send + Sync + 'static,
+    logout: impl Fn() -> Result<()> + Send + Sync + 'static,
+    fetch_submissions: impl Fn() -> Result<(Vec<QueueEntry>, Option<String>, Vec<FormField>)>
+        + Send
+        + Sync
+        + 'static,
+) -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<HostOutcome>();
+    let mut terminal = ratatui::init();
+    // Kick off the first load (and any pending request) before looping.
+    let pending_fetch = app.fetching.is_some();
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        tx,
+        rx,
+        pending_fetch,
+        HostOps {
+            refetch: std::sync::Arc::new(refetch),
+            run_action: std::sync::Arc::new(run_action),
+            run_writeups_fetch: std::sync::Arc::new(run_writeups_fetch),
+            run_config: std::sync::Arc::new(run_config),
+            logout: std::sync::Arc::new(logout),
+            fetch_submissions: std::sync::Arc::new(fetch_submissions),
+        },
+    );
+    ratatui::restore();
+    result
 }
 
 fn event_loop(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
-    host: &mut Host<'_>,
+    tx: std::sync::mpsc::Sender<HostOutcome>,
+    rx: std::sync::mpsc::Receiver<HostOutcome>,
+    mut pending_fetch: bool,
+    host: HostOps,
 ) -> Result<()> {
+    let HostOps {
+        refetch,
+        run_action,
+        run_writeups_fetch,
+        run_config,
+        logout,
+        fetch_submissions,
+    } = host;
+    // One host operation in the air at a time; set together with
+    // `app.fetching` and cleared when its outcome is applied.
+    let mut in_flight = false;
     loop {
         terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -1139,122 +1502,132 @@ fn event_loop(
 
         app.tick();
 
-        // Logout from the account popup (`l`): drop the stored account and
-        // the session, then return to the login popup. Active downloads
-        // keep running — they use public MEGA links, not the session.
-        if app.pending_logout {
-            app.pending_logout = false;
-            app.fetching = Some("Logging out...".to_string());
-            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-            match (host.logout)() {
-                Ok(()) => {
-                    app.fetching = None;
-                    app.needs_config = true;
-                    app.tab = Tab::Stats;
-                    app.input_mode = InputMode::Normal;
-                    app.view = ViewMode::Normal;
-                    app.filter.clear();
-                    app.set_data(TuiData::empty());
-                    app.open_config_popup(ConfigContext::LoggedOut, None);
-                    app.set_status("[✓] Logged out — enter another account or Esc to quit.");
-                }
-                Err(error) => {
-                    app.fetching = None;
-                    app.set_status(format!("Logout failed: {error:#}"));
-                }
-            }
+        // Apply any outcomes that arrived since the last iteration
+        // (non-blocking). Each one clears the busy state.
+        while let Ok(outcome) = rx.try_recv() {
+            in_flight = false;
+            app.fetching = None;
+            apply_outcome(app, outcome, &mut pending_fetch);
         }
 
-        // User actions from popups (config, flag submission, writeup upload,
-        // download start).
-        if let Some(action) = app.pending_action.take() {
-            match action.kind {
-                PopupKind::Download => {
-                    // Non-blocking: spawn a background job and move on.
-                    let dir = PathBuf::from(action.values[0].1.clone());
-                    match downloads::start_download(action.vm.clone(), dir) {
-                        Ok(job) => {
-                            app.set_status(format!("[↓] Download {} started.", action.vm));
-                            app.download_jobs.push(std::sync::Arc::new(job));
-                        }
-                        Err(error) => app.set_status(format!("Download failed: {error:#}")),
-                    }
-                }
-                PopupKind::Config => {
-                    let value = |field: usize| {
-                        action
-                            .values
-                            .iter()
-                            .find(|(f, _)| *f == field)
-                            .map(|(_, v)| v.clone())
-                            .unwrap_or_default()
-                    };
-                    let (username, password) = (value(0), value(1));
-                    app.fetching = Some(format!("Connecting as {username}..."));
-                    terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-                    match (host.run_config)(&username, &password) {
-                        Ok(()) => {
-                            app.fetching = None;
-                            app.needs_config = false;
-                            app.set_status(format!("[✓] Connected as {username} — loading data..."));
-                            *host.pending_fetch = true;
-                        }
-                        Err(error) => {
-                            app.fetching = None;
-                            app.set_status(format!("Configuration failed: {error:#}"));
-                            app.open_config_popup(ConfigContext::LoginFailed, Some(&username));
-                        }
-                    }
-                }
-                PopupKind::Account => unreachable!("no action is queued from the account popup"),
-                PopupKind::Flag | PopupKind::Upload => {
-                    let label = match action.kind {
-                        PopupKind::Flag => format!("Submitting flag for {}...", action.vm),
-                        PopupKind::Upload => format!("Submitting writeup for {}...", action.vm),
-                        _ => unreachable!("handled above"),
-                    };
-                    app.fetching = Some(label);
-                    terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-                    match (host.run_action)(action) {
-                        Ok(report) => {
-                            // Footer shows a 5s summary; the popup persists.
-                            app.set_status(report.status.clone());
-                            app.pending_refresh_after_close = report.changed;
-                            app.report = Some(report);
-                        }
-                        Err(error) => app.set_status(format!("Action failed: {error:#}")),
-                    }
-                    app.fetching = None;
-                }
+        if !in_flight {
+            // Logout from the account popup (`l`): drop the stored account
+            // and the session, then return to the login popup. Active
+            // downloads keep running — they use public MEGA links, not the
+            // session.
+            if app.pending_logout {
+                app.pending_logout = false;
+                in_flight = true;
+                app.fetching = Some(app.lang.t(Key::FetchingLogout).to_string());
+                let tx = tx.clone();
+                let logout = logout.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(HostOutcome::LoggedOut(logout()));
+                });
             }
-        }
 
-        // Blocking writeups fetch for the `w` key. Runs with a `⟳ Loading
-        // writeups for <vm>...` label; opens the popup on success.
-        if let Some(vm) = app.pending_writeups.take() {
-            app.fetching = Some(format!("Loading writeups for {vm}..."));
-            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-            match (host.run_writeups_fetch)(&vm) {
-                Ok(entries) => {
-                    app.fetching = None;
-                    if entries.is_empty() {
-                        app.set_status(format!("No community writeups found for {vm}."));
-                    } else {
-                        app.writeups_popup = Some(WriteupsPopup {
-                            vm,
-                            entries,
-                            selected: 0,
+            // User actions from popups (config, flag submission, writeup
+            // upload, download start).
+            if let Some(action) = app.pending_action.take() {
+                match action.kind {
+                    PopupKind::Download => {
+                        // Non-blocking: spawn a background job and move on.
+                        let dir = PathBuf::from(action.values[0].1.clone());
+                        match downloads::start_download(action.vm.clone(), dir) {
+                            Ok(job) => {
+                                app.set_status(fmt_key(
+                                    app.lang.t(Key::StatusDownloadStarted),
+                                    &[&action.vm],
+                                ));
+                                app.download_jobs.push(std::sync::Arc::new(job));
+                            }
+                            Err(error) => app.set_status(fmt_key(
+                                app.lang.t(Key::StatusDownloadFailed),
+                                &[&format!("{error:#}")],
+                            )),
+                        }
+                    }
+                    PopupKind::Config => {
+                        let value = |field: usize| {
+                            action
+                                .values
+                                .iter()
+                                .find(|(f, _)| *f == field)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_default()
+                        };
+                        in_flight = true;
+                        let (username, password) = (value(0), value(1));
+                        let tx = tx.clone();
+                        let run_config = run_config.clone();
+                        std::thread::spawn(move || {
+                            let result = run_config(&username, &password);
+                            let _ = tx.send(HostOutcome::Configured { username, result });
+                        });
+                    }
+                    PopupKind::Account | PopupKind::Rules => {
+                        unreachable!("no action is queued from these popups")
+                    }
+                    PopupKind::Flag | PopupKind::Upload | PopupKind::SubmissionForm => {
+                        let label = match action.kind {
+                            PopupKind::Flag => {
+                                fmt_key(app.lang.t(Key::FetchingFlag), &[&action.vm])
+                            }
+                            PopupKind::Upload => {
+                                fmt_key(app.lang.t(Key::FetchingWriteup), &[&action.vm])
+                            }
+                            _ => unreachable!("handled above"),
+                        };
+                        in_flight = true;
+                        app.fetching = Some(label);
+                        let tx = tx.clone();
+                        let run_action = run_action.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(HostOutcome::Actioned(run_action(action)));
                         });
                     }
                 }
-                Err(error) => {
-                    app.fetching = None;
-                    app.set_status(format!("Fetch failed: {error:#}"));
-                }
+            }
+
+            // Queued writeups fetch for the `w` key. Runs with a
+            // `⟳ Loading writeups for <vm>...` label; opens the popup when
+            // the outcome arrives.
+            if let Some(vm) = app.pending_writeups.take() {
+                in_flight = true;
+                app.fetching = Some(fmt_key(app.lang.t(Key::FetchingWriteupsList), &[&vm]));
+                let tx = tx.clone();
+                let run_writeups_fetch = run_writeups_fetch.clone();
+                std::thread::spawn(move || {
+                    let result = run_writeups_fetch(&vm);
+                    let _ = tx.send(HostOutcome::Writeups { vm, result });
+                });
+            }
+
+            // Queued submissions fetch (Submissions tab open or `r` there).
+            if app.pending_submissions {
+                app.pending_submissions = false;
+                in_flight = true;
+                app.fetching = Some(app.lang.t(Key::FetchingRefreshing).to_string());
+                let tx = tx.clone();
+                let fetch_submissions = fetch_submissions.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(HostOutcome::Submissions {
+                        result: fetch_submissions(),
+                    });
+                });
+            }
+
+            // Full dashboard refresh.
+            if app.should_fetch(pending_fetch) {
+                pending_fetch = false;
+                app.refresh_requested = false;
+                in_flight = true;
+                app.fetching = Some(app.lang.t(Key::FetchingRefreshing).to_string());
+                let tx = tx.clone();
+                let refetch = refetch.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(HostOutcome::Fetched(Box::new(refetch())));
+                });
             }
         }
 
@@ -1264,33 +1637,17 @@ fn event_loop(
             while let Some((vm, dir)) = app.download_queue.pop_front() {
                 match downloads::start_download(vm.clone(), dir) {
                     Ok(job) => {
-                        app.set_status(format!("[↓] Queued download {} started.", vm));
+                        app.set_status(fmt_key(app.lang.t(Key::StatusDownloadStarted), &[&vm]));
                         app.download_jobs.push(std::sync::Arc::new(job));
                     }
-                    Err(error) => app.set_status(format!("Download failed: {error:#}")),
+                    Err(error) => app.set_status(fmt_key(
+                        app.lang.t(Key::StatusDownloadFailed),
+                        &[&format!("{error:#}")],
+                    )),
                 }
                 if app.active_downloads() >= downloads::PARALLEL_DOWNLOADS {
                     break;
                 }
-            }
-        }
-
-        if app.should_fetch(*host.pending_fetch) {
-            *host.pending_fetch = false;
-            app.refresh_requested = false;
-            app.fetching = Some("Refreshing data...".to_string());
-            // Draw immediately so the `⟳ <label>` shows while the blocking
-            // fetch runs, instead of freezing silently.
-            terminal.draw(|frame| crate::tui::render::draw(frame, app))?;
-
-            let result = (host.refetch)();
-            app.fetching = None;
-            match result {
-                Ok(data) => {
-                    app.set_data(data);
-                    app.set_status("Data refreshed.");
-                }
-                Err(error) => app.set_status(format!("Fetch failed: {error:#}")),
             }
         }
 
@@ -1304,6 +1661,99 @@ fn event_loop(
             }
             return Ok(());
         }
+    }
+}
+
+/// Applies one background operation result to the app state. Called with
+/// `fetching` already cleared; the loop dispatches new work on the next
+/// iteration.
+fn apply_outcome(app: &mut AppState, outcome: HostOutcome, pending_fetch: &mut bool) {
+    match outcome {
+        HostOutcome::Fetched(result) => match *result {
+            Ok(data) => {
+                app.set_data(data);
+                app.set_status(app.lang.t(Key::StatusDataRefreshed));
+            }
+            Err(error) => app.set_status(fmt_key(
+                app.lang.t(Key::StatusFetchFailed),
+                &[&format!("{error:#}")],
+            )),
+        },
+        HostOutcome::Actioned(Ok(report)) => {
+            // Footer shows a 5s summary; the popup persists.
+            app.set_status(report.status.clone());
+            app.pending_refresh_after_close = report.changed;
+            app.report = Some(report);
+        }
+        HostOutcome::Actioned(Err(error)) => app.set_status(fmt_key(
+            app.lang.t(Key::StatusActionFailed),
+            &[&format!("{error:#}")],
+        )),
+        HostOutcome::Writeups { vm, result } => match result {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    app.set_status(fmt_key(app.lang.t(Key::StatusNoWriteups), &[&vm]));
+                } else {
+                    app.writeups_popup = Some(WriteupsPopup {
+                        vm,
+                        entries,
+                        selected: 0,
+                    });
+                }
+            }
+            Err(error) => app.set_status(fmt_key(
+                app.lang.t(Key::StatusFetchFailed),
+                &[&format!("{error:#}")],
+            )),
+        },
+        HostOutcome::Configured { username, result } => match result {
+            Ok(()) => {
+                app.needs_config = false;
+                app.set_status(fmt_key(app.lang.t(Key::StatusConnectedAs), &[&username]));
+                *pending_fetch = true;
+            }
+            Err(error) => {
+                app.set_status(fmt_key(
+                    app.lang.t(Key::StatusConfigFailed),
+                    &[&format!("{error:#}")],
+                ));
+                app.open_config_popup(ConfigContext::LoginFailed, Some(&username));
+            }
+        },
+        HostOutcome::LoggedOut(Ok(())) => {
+            app.needs_config = true;
+            app.tab = Tab::Stats;
+            app.input_mode = InputMode::Normal;
+            app.view = ViewMode::Normal;
+            app.filter.clear();
+            app.set_data(TuiData::empty());
+            app.open_config_popup(ConfigContext::LoggedOut, None);
+            app.set_status(app.lang.t(Key::StatusLoggedOut));
+        }
+        HostOutcome::LoggedOut(Err(error)) => {
+            app.set_status(fmt_key(
+                app.lang.t(Key::StatusLogoutFailed),
+                &[&format!("{error:#}")],
+            ));
+        }
+        HostOutcome::Submissions { result } => match result {
+            Ok((queue, rules, form)) => {
+                app.data.submissions = queue;
+                if rules.is_some() {
+                    app.data.rules = rules;
+                }
+                if !form.is_empty() {
+                    app.data.submission_form = form;
+                }
+                if app.tab == Tab::Submissions {
+                    app.reset_list_position();
+                }
+            }
+            Err(error) => app.set_status(fmt_key(
+                app.lang.t(Key::StatusFetchFailed),
+                &[&format!("{error:#}")],
+            )),
+        },
     }
 }
 
@@ -1377,7 +1827,7 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
                     // Nothing else to do without an account — leave.
                     app.quit = true;
                 } else {
-                    app.set_status("Cancelled.");
+                    app.set_status(app.lang.t(Key::StatusCancelled));
                 }
             }
             KeyCode::Enter => app.confirm_popup(),
@@ -1392,14 +1842,38 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
                 }
             }
             KeyCode::Tab => {
-                let is_download =
-                    app.popup.as_ref().map(|p| p.kind) == Some(PopupKind::Download);
-                if let Some(popup) = app.popup.as_mut() {
-                    if is_download {
+                let is_download = app.popup.as_ref().map(|p| p.kind) == Some(PopupKind::Download);
+                if is_download {
+                    if let Some(popup) = app.popup.as_mut() {
                         popup.complete_destination();
-                    } else {
+                    }
+                } else if let Some(popup) = app.popup.as_mut() {
+                    popup.next_field();
+                }
+            }
+            KeyCode::Right | KeyCode::Left => {
+                // ←/→ on a <select> field cycles its locked value
+                // (Easy -> Medium -> Hard); on text fields it moves fields.
+                let select_options: Option<Vec<String>> = app.popup.as_ref().and_then(|popup| {
+                    app.data
+                        .submission_form
+                        .get(popup.field)
+                        .and_then(|f| match &f.kind {
+                            FieldKind::Select(options) => Some(options.clone()),
+                            _ => None,
+                        })
+                });
+                let forward = key.code == KeyCode::Right;
+                if let Some(options) = select_options {
+                    if let Some(popup) = app.popup.as_mut() {
+                        popup.cycle_value_step(&options, forward);
+                    }
+                } else if forward {
+                    if let Some(popup) = app.popup.as_mut() {
                         popup.next_field();
                     }
+                } else if let Some(popup) = app.popup.as_mut() {
+                    popup.previous_field();
                 }
             }
             KeyCode::Down => {
@@ -1408,8 +1882,16 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
                 }
             }
             KeyCode::Char(c) => {
-                if let Some(popup) = app.popup.as_mut() {
-                    popup.push(c);
+                // Locked select fields accept no typing.
+                let is_locked_select = app
+                    .popup
+                    .as_ref()
+                    .and_then(|popup| app.data.submission_form.get(popup.field))
+                    .is_some_and(|f| matches!(f.kind, FieldKind::Select(_)));
+                if !is_locked_select {
+                    if let Some(popup) = app.popup.as_mut() {
+                        popup.push(c);
+                    }
                 }
             }
             _ => {}
@@ -1438,22 +1920,21 @@ fn handle_key(app: &mut AppState, key: crossterm::event::KeyEvent) {
             KeyCode::Home | KeyCode::Char('g') => app.move_start(),
             KeyCode::Char('/') => app.enter_filter_mode(),
             KeyCode::Char('a') => app.open_account_popup(),
+            KeyCode::Char('l') => app.toggle_language(),
             KeyCode::Char('s') => app.cycle_machine_sort(),
+            KeyCode::Char('h') if app.tab == Tab::Machines => app.toggle_hide_pwned(),
             KeyCode::Char('f') => app.open_action_popup(PopupKind::Flag),
             KeyCode::Char('u') => app.open_action_popup(PopupKind::Upload),
             KeyCode::Char('d') => app.open_action_popup(PopupKind::Download),
             KeyCode::Char('w') => app.open_writeups_popup(),
+            KeyCode::Char('v') if app.tab == Tab::Submissions => app.open_submission_form(),
+            KeyCode::Char('i') if app.tab == Tab::Submissions => app.open_rules_popup(),
             KeyCode::Char('o') => app.toggle_downloads_view(),
             KeyCode::Char('c') if app.view == ViewMode::Downloads => {
                 // Cancel the most recent active download from the overlay.
-                if let Some(job) = app
-                    .download_jobs
-                    .iter()
-                    .rev()
-                    .find(|job| job.is_active())
-                {
+                if let Some(job) = app.download_jobs.iter().rev().find(|job| job.is_active()) {
                     job.request_cancel();
-                    app.set_status(format!("Cancelling {}...", job.vm));
+                    app.set_status(fmt_key(app.lang.t(Key::StatusCancelDownload), &[&job.vm]));
                 }
             }
             KeyCode::Enter => app.open_selected_link(),
@@ -1493,11 +1974,7 @@ mod tests {
                 ..Default::default()
             },
             progress: vec![("Total VMs".into(), 166, 371)],
-            pending: vec![
-                "Fuxa".to_string(),
-                "Liar".to_string(),
-                "Rooted".to_string(),
-            ],
+            pending: vec!["Fuxa".to_string(), "Liar".to_string(), "Rooted".to_string()],
             catalog: vec![
                 Machine {
                     name: "Fuxa".into(),
@@ -1505,6 +1982,7 @@ mod tests {
                     size: "0.5 Gb".into(),
                     difficulty: "beginner".into(),
                     os: "linux".into(),
+                    tested: String::new(),
                     status: "PWNED".into(),
                 },
                 Machine {
@@ -1513,6 +1991,7 @@ mod tests {
                     size: "1.3 Gb".into(),
                     difficulty: "advanced".into(),
                     os: "linux".into(),
+                    tested: String::new(),
                     status: "TO HACK".into(),
                 },
                 Machine {
@@ -1521,6 +2000,7 @@ mod tests {
                     size: "0.8 Gb".into(),
                     difficulty: "intermediate".into(),
                     os: "linux".into(),
+                    tested: String::new(),
                     status: "DONE".into(),
                 },
             ],
@@ -1538,6 +2018,9 @@ mod tests {
                     released: false,
                 },
             ],
+            submissions: vec![],
+            submission_form: vec![],
+            rules: None,
         }
     }
 
@@ -1574,6 +2057,7 @@ mod tests {
     #[test]
     fn selection_clamps_to_visible_rows() {
         let mut state = app();
+        state.next_tab(); // Writeups
         state.next_tab(); // Pending (3 rows)
         state.set_visible_rows(2);
         state.move_down();
@@ -1741,23 +2225,13 @@ mod tests {
 
         state.open_action_popup(PopupKind::Flag);
         // Fill the user flag, then hop to the root field (Tab) and fill it.
-        state
-            .popup
-            .as_mut()
-            .unwrap()
-            .buffers[0]
-            .push_str("flag{user}");
+        state.popup.as_mut().unwrap().buffers[0].push_str("flag{user}");
         handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
         );
         assert_eq!(state.popup.as_ref().unwrap().field, 1);
-        state
-            .popup
-            .as_mut()
-            .unwrap()
-            .buffers[1]
-            .push_str("flag{root}");
+        state.popup.as_mut().unwrap().buffers[1].push_str("flag{root}");
         state.confirm_popup();
 
         let action = state.pending_action.take().unwrap();
@@ -1773,11 +2247,9 @@ mod tests {
 
         // User accepted, Root rejected.
         let report = super::build_flag_report(
+            crate::i18n::Lang::En,
             "Arcane",
-            vec![
-                (0, FlagVerdict::Correct),
-                (1, FlagVerdict::Wrong),
-            ],
+            vec![(0, FlagVerdict::Correct), (1, FlagVerdict::Wrong)],
         );
         assert_eq!(report.title, " Flag results — Arcane ");
         assert_eq!(report.entries[0].0, ReportKind::Success);
@@ -1788,16 +2260,25 @@ mod tests {
         assert_eq!(report.status, "[+] User ✓ · Root ✗");
 
         // Root field only (index 1) keeps its Root label — not shifted.
-        let report = super::build_flag_report("Arcane", vec![(1, FlagVerdict::Wrong)]);
+        let report = super::build_flag_report(
+            crate::i18n::Lang::En,
+            "Arcane",
+            vec![(1, FlagVerdict::Wrong)],
+        );
         assert_eq!(report.entries[0].1, "Root flag: ✗ REJECTED");
         assert!(!report.changed);
 
         // Lone accepted flag keeps the celebratory footer.
-        let report = super::build_flag_report("Arcane", vec![(0, FlagVerdict::Correct)]);
+        let report = super::build_flag_report(
+            crate::i18n::Lang::En,
+            "Arcane",
+            vec![(0, FlagVerdict::Correct)],
+        );
         assert_eq!(report.status, "[✓] You hacked Arcane!");
 
         // All rejected -> no refresh.
         let report = super::build_flag_report(
+            crate::i18n::Lang::En,
             "Arcane",
             vec![(0, FlagVerdict::Wrong), (1, FlagVerdict::Wrong)],
         );
@@ -1810,6 +2291,7 @@ mod tests {
 
         let mut state = app();
         state.report = Some(super::build_flag_report(
+            crate::i18n::Lang::En,
             "Arcane",
             vec![(0, FlagVerdict::Correct)],
         ));
@@ -1832,6 +2314,7 @@ mod tests {
 
         // Without changes, closing never refreshes.
         state.report = Some(super::build_flag_report(
+            crate::i18n::Lang::En,
             "Arcane",
             vec![(0, FlagVerdict::Wrong)],
         ));
@@ -1925,7 +2408,11 @@ mod tests {
         // First q warns instead of quitting.
         state.request_quit();
         assert!(!state.quit);
-        assert!(state.status.as_deref().unwrap().contains("q again to abort"));
+        assert!(state
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("q again to abort"));
 
         // Second q quits (abort handled by the event loop).
         state.request_quit();
@@ -1936,14 +2423,17 @@ mod tests {
     fn action_keys_are_tab_gated() {
         // 'f' on Pending -> blocked; 'u' on Pending -> allowed.
         let mut state = app();
-        state.next_tab();
+        state.next_tab(); // Writeups
         state.next_tab(); // Pending
         state.popup = None;
         handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
         );
-        assert!(state.popup.is_none(), "flag popup must be blocked on Pending");
+        assert!(
+            state.popup.is_none(),
+            "flag popup must be blocked on Pending"
+        );
         assert!(state.status.is_some());
 
         handle_key(
@@ -1959,7 +2449,10 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
         );
-        assert!(state.popup.is_none(), "upload popup must be blocked on Machines");
+        assert!(
+            state.popup.is_none(),
+            "upload popup must be blocked on Machines"
+        );
         assert!(state.status.is_some());
 
         handle_key(
@@ -2059,19 +2552,28 @@ mod tests {
 
         super::handle_key(
             &mut state,
-            crossterm::event::KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::empty()),
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('j'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
         );
         assert_eq!(state.selected, 1);
 
         super::handle_key(
             &mut state,
-            crossterm::event::KeyEvent::new(KeyCode::Char('/'), crossterm::event::KeyModifiers::empty()),
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('/'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
         );
         assert_eq!(state.input_mode, InputMode::Filter);
 
         super::handle_key(
             &mut state,
-            crossterm::event::KeyEvent::new(KeyCode::Char('x'), crossterm::event::KeyModifiers::empty()),
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
         );
         assert_eq!(state.filter, "x");
 
@@ -2084,7 +2586,10 @@ mod tests {
 
         super::handle_key(
             &mut state,
-            crossterm::event::KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::empty()),
+            crossterm::event::KeyEvent::new(
+                KeyCode::Char('q'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
         );
         assert!(state.quit);
     }
@@ -2143,7 +2648,11 @@ mod tests {
         state.next_tab(); // Machines
         assert_eq!(state.machine_sort, MachineSort::Default);
         fn names(state: &AppState) -> Vec<&str> {
-            state.visible_machines().iter().map(|m| m.name.as_str()).collect()
+            state
+                .visible_machines()
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect()
         }
         // Site order: Fuxa (0.5 Gb), Nebula1 (1.3 Gb), Arcane (0.8 Gb).
         assert_eq!(names(&state), ["Fuxa", "Nebula1", "Arcane"]);
@@ -2243,10 +2752,12 @@ mod tests {
         assert!(state.selected_writeup_url().is_none()); // Stats tab
         state.next_tab();
         assert_eq!(state.tab, Tab::Writeups);
+        // Row 0: Economists.
         assert_eq!(
             state.selected_writeup_url(),
             Some("https://example.com/economists.md")
         );
+        // Filter 'z' narrows to Za1.
         state.filter_push('z');
         state.reset_list_position_for_test();
         assert_eq!(
@@ -2255,5 +2766,130 @@ mod tests {
         );
         state.next_tab(); // Pending
         assert!(state.selected_writeup_url().is_none());
+    }
+
+    #[test]
+    fn set_data_preserves_selection_by_name() {
+        let mut state = app();
+        state.next_tab(); // Writeups
+        state.next_tab(); // Pending
+        state.next_tab(); // Machines
+
+        // Select Nebula1 (row 1 of the catalog).
+        state.move_down();
+
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Nebula1"));
+
+        // A fresh catalog with a different order and extra rows keeps the
+        // selection on Nebula1.
+        let mut data = sample_data();
+        data.catalog.insert(0, data.catalog[2].clone()); // Arcane first
+        data.catalog.push(Machine {
+            name: "Zephyr".into(),
+            creator: "someone".into(),
+            size: "1.0 Gb".into(),
+            difficulty: "beginner".into(),
+            os: "windows".into(),
+            tested: String::new(),
+            status: "TO HACK".into(),
+        });
+        state.set_data(data);
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Nebula1"));
+        assert!(state.selected > 0);
+    }
+
+    #[test]
+    fn set_data_resets_when_selection_missing() {
+        let mut state = app();
+        state.next_tab(); // Writeups
+        state.next_tab(); // Pending
+        state.next_tab(); // Machines
+        state.move_down();
+        state.move_down(); // Arcane (row 2)
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Arcane"));
+
+        // New data without Arcane: fall back to the top of the list.
+        let mut data = sample_data();
+        data.catalog.retain(|m| m.name != "Arcane");
+        state.set_data(data);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected_machine_name().as_deref(), Some("Fuxa"));
+    }
+
+    #[test]
+    fn busy_fetch_gates_network_actions() {
+        let mut state = app();
+        state.next_tab(); // Writeups
+        state.next_tab(); // Pending
+        state.next_tab(); // Machines
+        state.fetching = Some("Refreshing data...".to_string());
+        assert!(
+            state.popup.is_none(),
+            "flag popup is blocked while fetching"
+        );
+        state.open_writeups_popup();
+        assert!(
+            state.pending_writeups.is_none(),
+            "writeups fetch is blocked while fetching"
+        );
+        state.open_account_popup();
+        assert!(
+            state.popup.is_none(),
+            "account popup is blocked while fetching"
+        );
+        state.request_refresh();
+        assert!(
+            !state.refresh_requested,
+            "refresh is blocked while fetching"
+        );
+
+        // Idle again: the same actions go through.
+        state.fetching = None;
+        state.open_action_popup(PopupKind::Flag);
+        assert_eq!(state.popup.as_ref().map(|p| p.kind), Some(PopupKind::Flag));
+    }
+
+    #[test]
+    fn hide_pwned_toggles_and_filters() {
+        let mut state = app();
+        state.next_tab(); // Writeups
+        state.next_tab(); // Pending
+        state.next_tab(); // Machines
+
+        // Catalog sample: Fuxa (PWNED), Nebula1 (TO HACK), Arcane (DONE).
+        assert_eq!(state.visible_machines().len(), 3);
+
+        // `h` hides the PWNED machine and resets the selection.
+        state.move_down(); // Nebula1
+        state.toggle_hide_pwned();
+        assert!(state.hide_pwned);
+        let names: Vec<&str> = state
+            .visible_machines()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, ["Nebula1", "Arcane"]);
+        assert_eq!(state.selected, 0, "toggle resets the selection");
+
+        // Text filter still applies on top of the hide: "ar" matches
+        // Arcane (name) and Nebula1 (creator "Sublarge"), but not the
+        // hidden PWNED Fuxa.
+        state.filter_push('a');
+        state.filter_push('r');
+        assert_eq!(state.visible_machines().len(), 2);
+        state.clear_filter();
+
+        // Second `h` shows everything again.
+        state.toggle_hide_pwned();
+        assert!(!state.hide_pwned);
+        assert_eq!(state.visible_machines().len(), 3);
+
+        // Gated to the Machines tab like the other machine actions.
+        state.previous_tab(); // Pending
+        state.previous_tab(); // Writeups
+        state.previous_tab(); // Stats
+        assert_eq!(state.tab, Tab::Stats);
+        state.toggle_hide_pwned();
+        assert!(!state.hide_pwned);
     }
 }

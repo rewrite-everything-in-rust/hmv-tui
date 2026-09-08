@@ -10,9 +10,10 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use super::{
-    ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab, ViewMode,
-    WriteupsPopup, downloads::Phase,
+    downloads::Phase, ActionReport, AppState, InputMode, Popup, PopupKind, ReportKind, Tab,
+    ViewMode, WriteupsPopup,
 };
+use crate::i18n::Key;
 
 // Nord theme palette (https://www.nordtheme.com/docs/colors-and-palettes).
 const NORD1: Color = Color::Rgb(0x3B, 0x42, 0x52); // polar night (dim bg)
@@ -53,6 +54,7 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         Tab::Pending => draw_pending(frame, body, app),
         Tab::Machines => draw_machines(frame, body, app),
         Tab::Releases => draw_releases(frame, body, app),
+        Tab::Submissions => draw_submissions(frame, body, app),
     }
 
     draw_footer(frame, footer, app);
@@ -61,15 +63,16 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         draw_downloads(frame, frame.area(), app);
     }
     if let Some(popup) = &app.popup {
-        draw_popup(frame, frame.area(), popup);
+        draw_popup(frame, frame.area(), popup, app);
     }
     if let Some(report) = &app.report {
-        draw_report(frame, frame.area(), report);
+        let lang = app.lang;
+        draw_report(frame, frame.area(), report, &lang);
     }
     if app.writeups_popup.is_some() {
-        if let Some(popup) = app.writeups_popup.clone() {
-            draw_writeups_popup(frame, frame.area(), &popup);
-        }
+        let popup = app.writeups_popup.clone().unwrap();
+        let lang = app.lang;
+        draw_writeups_popup(frame, frame.area(), &popup, &lang);
     }
 }
 
@@ -78,7 +81,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
     let pending_count = app.data.pending.len();
     let line = Line::from(vec![
         Span::styled(" HackMyVM", Style::new().fg(ACCENT).bold()),
-        Span::styled(" dashboard", Style::new().dim()),
+        Span::styled(
+            format!(" {}", app.lang.t(Key::HeaderDashboard).trim()),
+            Style::new().dim(),
+        ),
         Span::raw("  ·  "),
         Span::styled(
             format!("{} ", stats.username),
@@ -105,7 +111,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &AppState) {
-    let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
+    let titles: Vec<&str> = Tab::ALL
+        .iter()
+        .map(|t| match t {
+            Tab::Stats => app.lang.t(Key::TabStats),
+            Tab::Writeups => app.lang.t(Key::TabWriteups),
+            Tab::Pending => app.lang.t(Key::TabPending),
+            Tab::Machines => app.lang.t(Key::TabMachines),
+            Tab::Releases => app.lang.t(Key::TabReleases),
+            Tab::Submissions => app.lang.t(Key::TabSubmissions),
+        })
+        .collect();
     let index = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
     let tabs = Tabs::new(titles)
         .select(index)
@@ -117,27 +133,72 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn draw_stats(frame: &mut Frame, area: Rect, app: &AppState) {
     let stats = &app.data.stats;
-    let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)])
-        .areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)]).areas(area);
 
     let mut lines = vec![
-        Line::from(Span::styled("[ Identity ]", Style::new().fg(ACCENT).bold())),
-        Line::from(format!("  Rank      : {}", stats.rank.as_deref().unwrap_or("-"))),
-        Line::from(format!("  Title     : {}", stats.title.as_deref().unwrap_or("-"))),
-        Line::from(format!("  Country   : {}", stats.country.as_deref().unwrap_or("-"))),
-        Line::from(format!("  Loved     : {}", stats.loved)),
-        Line::from(""),
-        Line::from(Span::styled("[ Achievements ]", Style::new().fg(ACCENT).bold())),
-        Line::from(format!("  Points      : {}", stats.points)),
-        Line::from(format!("  Total Roots : {}", stats.roots)),
-        Line::from(format!("  Total Users : {}", stats.users)),
-        Line::from(format!("  First Roots : {}", stats.first_roots)),
-        Line::from(format!("  First Users : {}", stats.first_users)),
-        Line::from(format!("  Challenges  : {}", stats.challenges)),
-        Line::from(format!("  Writeups    : {}", stats.writeups)),
+        Line::from(Span::styled(
+            app.lang.t(Key::StatsIdentity),
+            Style::new().fg(ACCENT).bold(),
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsRank),
+            stats.rank.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsTitle),
+            stats.title.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsCountry),
+            stats.country.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!("{}{}", app.lang.t(Key::StatsLoved), stats.loved)),
         Line::from(""),
         Line::from(Span::styled(
-            format!("[ Trophies ] ({})", stats.trophies.len()),
+            app.lang.t(Key::StatsAchievements),
+            Style::new().fg(ACCENT).bold(),
+        )),
+        Line::from(format!("{}{}", app.lang.t(Key::StatsPoints), stats.points)),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsTotalRoots),
+            stats.roots
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsTotalUsers),
+            stats.users
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsFirstRoots),
+            stats.first_roots
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsFirstUsers),
+            stats.first_users
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsChallenges),
+            stats.challenges
+        )),
+        Line::from(format!(
+            "{}{}",
+            app.lang.t(Key::StatsWriteups),
+            stats.writeups
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            super::fmt_key(
+                app.lang.t(Key::StatsTrophies),
+                &[&stats.trophies.len().to_string()],
+            ),
             Style::new().fg(ACCENT).bold(),
         )),
     ];
@@ -147,12 +208,13 @@ fn draw_stats(frame: &mut Frame, area: Rect, app: &AppState) {
 
     frame.render_widget(Paragraph::new(lines), left);
 
-    let title = Paragraph::new(Span::styled("[ Progress ]", Style::new().fg(ACCENT).bold()));
+    let title = Paragraph::new(Span::styled(
+        app.lang.t(Key::StatsProgress),
+        Style::new().fg(ACCENT).bold(),
+    ));
     frame.render_widget(title, right);
 
     // One single-row gauge per metric: "Total VMs 167/371 (45%) ━━━━░░░░".
-    // The old two-row Gauge buried its centered label inside the bar, which
-    // rendered as unmarked block rows on wide terminals.
     let mut y = right.y + 2;
     let width = right.width.saturating_sub(4).max(16);
     for (label, value, total) in &app.data.progress {
@@ -213,11 +275,7 @@ fn draw_writeups(frame: &mut Frame, area: Rect, app: &mut AppState) {
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::new()
-            .bg(HL_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
     .block(filter_block(app));
 
     let mut state = TableState::default().with_selected(Some(app.selected));
@@ -242,11 +300,7 @@ fn draw_pending(frame: &mut Frame, area: Rect, app: &mut AppState) {
         .collect();
 
     let list = List::new(items)
-        .highlight_style(
-            Style::new()
-                .bg(HL_BG)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
         .block(filter_block(app));
 
     let mut state = ListState::default().with_selected(Some(app.selected));
@@ -267,25 +321,40 @@ fn draw_pending(frame: &mut Frame, area: Rect, app: &mut AppState) {
 fn filter_block(app: &AppState) -> Block<'_> {
     let count_line = match app.tab {
         Tab::Writeups => format!(
-            " Writeups {}/{} ",
+            " {} {}/{} ",
+            app.lang.t(Key::TabWriteups),
             app.visible_writeups().len(),
             app.data.stats.accepted_writeups.len()
         ),
         Tab::Pending => format!(
-            " Pending {}/{} ",
+            " {} {}/{} ",
+            app.lang.t(Key::TabPending),
             app.visible_pending().len(),
             app.data.pending.len()
         ),
         Tab::Machines => format!(
-            " Machines {}/{}{} ",
+            " {} {}/{}{}{} ",
+            app.lang.t(Key::TabMachines),
             app.visible_machines().len(),
             app.data.catalog.len(),
-            app.machine_sort.indicator()
+            app.machine_sort.indicator(),
+            if app.hide_pwned {
+                app.lang.t(Key::PwnedHiddenIndicator)
+            } else {
+                ""
+            }
         ),
         Tab::Releases => format!(
-            " Releases {}/{} ",
+            " {} {}/{} ",
+            app.lang.t(Key::TabReleases),
             app.visible_releases().len(),
             app.data.releases.len()
+        ),
+        Tab::Submissions => format!(
+            " {} {}/{} ",
+            app.lang.t(Key::TabSubmissions),
+            app.visible_submissions().len(),
+            app.data.submissions.len()
         ),
         Tab::Stats => String::new(),
     };
@@ -297,14 +366,14 @@ fn filter_block(app: &AppState) -> Block<'_> {
     if app.input_mode == InputMode::Filter {
         block = block
             .title(Span::styled(
-                format!(" filter: {}▏", app.filter),
+                format!("{}{}▏", app.lang.t(Key::FilterLabel), app.filter),
                 Style::new().fg(WARN).bold(),
             ))
             .title_position(ratatui::widgets::block::Position::Top)
             .border_style(Style::new().fg(WARN));
     } else if !app.filter.is_empty() {
         block = block.title(Span::styled(
-            format!(" filter: {} ", app.filter),
+            format!("{}{} ", app.lang.t(Key::FilterLabel), app.filter),
             Style::new().fg(WARN),
         ));
     }
@@ -317,8 +386,16 @@ fn filter_block(app: &AppState) -> Block<'_> {
 
 fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let visible = app.visible_machines();
-    let header = Row::new(["VM", "Difficulty", "Creator", "Size", "Status"])
-        .style(Style::new().fg(ACCENT).bold());
+    let header = Row::new([
+        app.lang.t(Key::ColVm),
+        app.lang.t(Key::ColDifficulty),
+        app.lang.t(Key::ColCreator),
+        app.lang.t(Key::ColSize),
+        app.lang.t(Key::ColOs),
+        app.lang.t(Key::ColCompat),
+        app.lang.t(Key::ColStatus),
+    ])
+    .style(Style::new().fg(ACCENT).bold());
 
     let rows: Vec<Row> = visible
         .iter()
@@ -329,6 +406,16 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
                 "INTERMEDIATE" => Span::styled(diff, Style::new().fg(WARN)),
                 "ADVANCED" => Span::styled(diff, Style::new().fg(BAD)),
                 _ => Span::raw(diff),
+            };
+            let os_span = if m.os == "windows" {
+                Span::styled(m.os.clone(), Style::new().fg(FROST))
+            } else {
+                Span::styled(m.os.clone(), Style::new().fg(WARN))
+            };
+            let compat = if m.tested.is_empty() {
+                app.lang.t(Key::NoCompat).to_string()
+            } else {
+                m.tested.clone()
             };
             let status = m.status.to_uppercase();
             let status_span = if status.contains("DONE") || status.contains("PWNED") {
@@ -341,6 +428,8 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
                 diff_span,
                 Span::raw(m.creator.clone()),
                 Span::raw(m.size.clone()),
+                os_span,
+                Span::styled(compat, Style::new().dim()),
                 status_span,
             ])
         })
@@ -349,19 +438,17 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let table = Table::new(
         rows,
         [
+            Constraint::Length(16),
+            Constraint::Length(13),
+            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(9),
             Constraint::Length(18),
-            Constraint::Length(14),
-            Constraint::Length(14),
-            Constraint::Length(10),
             Constraint::Fill(1),
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::new()
-            .bg(HL_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
     .block(filter_block(app));
 
     let mut state = TableState::default().with_selected(Some(app.selected));
@@ -370,7 +457,8 @@ fn draw_machines(frame: &mut Frame, area: Rect, app: &mut AppState) {
     app.set_visible_rows(visible_rows_in(area.height, visible.len()));
 }
 
-fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
+fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup, app: &AppState) {
+    let lang = &app.lang;
     // Account overview: shows the active account with switch/logout actions.
     if popup.kind == PopupKind::Account {
         let box_area = popup_area(area, 56, 7);
@@ -378,22 +466,60 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let username = if popup.vm.is_empty() { "-" } else { &popup.vm };
         let lines = vec![
             Line::from(Span::styled(
-                format!("Logged in as {username}"),
+                super::fmt_key(lang.t(Key::PopupLoggedInAs), &[username]),
                 Style::new().fg(OK).bold(),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Enter switch account · l logout · Esc close",
+                lang.t(Key::PopupAccountHint),
                 Style::new().dim(),
             )),
         ];
         let block = Block::bordered()
             .title(Span::styled(
-                format!(" Account — {username} "),
+                super::fmt_key(lang.t(Key::PopupAccountTitle), &[username]),
                 Style::new().fg(OK).bold(),
             ))
             .border_style(Style::new().fg(OK));
         frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        return;
+    }
+
+    // Submission rules viewer: readonly text popup (`i` on Submissions).
+    if popup.kind == PopupKind::Rules {
+        let width = area.width.saturating_sub(8).max(100);
+        let height = area.height.saturating_sub(4).max(20);
+        let box_area = popup_area(area, width, height);
+        frame.render_widget(Clear, box_area);
+        let rules_lines: Vec<Line> = popup
+            .buffers
+            .first()
+            .map(|text| {
+                text.lines()
+                    .map(|l| {
+                        Line::from(Span::styled(
+                            l.to_string(),
+                            if l.starts_with(char::is_numeric) {
+                                Style::new().fg(ACCENT).bold()
+                            } else {
+                                Style::new().fg(BRIGHT)
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let block = Block::bordered()
+            .title(Span::styled(
+                lang.t(Key::RulesTitle),
+                Style::new().fg(ACCENT).bold(),
+            ))
+            .title_bottom(Span::styled(
+                lang.t(Key::PopupPwnedClose),
+                Style::new().dim(),
+            ))
+            .border_style(Style::new().fg(ACCENT));
+        frame.render_widget(Paragraph::new(rules_lines).block(block), box_area);
         return;
     }
 
@@ -403,19 +529,22 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         frame.render_widget(Clear, box_area);
         let lines = vec![
             Line::from(Span::styled(
-                "User & root flags are in.",
+                lang.t(Key::PopupPwnedLine1),
                 Style::new().fg(OK),
             )),
             Line::from(Span::styled(
-                "Resubmission is disabled.",
+                lang.t(Key::PopupPwnedLine2),
                 Style::new().dim(),
             )),
             Line::from(""),
-            Line::from(Span::styled("Enter / Esc close", Style::new().dim())),
+            Line::from(Span::styled(
+                lang.t(Key::PopupPwnedClose),
+                Style::new().dim(),
+            )),
         ];
         let block = Block::bordered()
             .title(Span::styled(
-                format!(" ✓ Already PWNED — {} ", popup.vm),
+                super::fmt_key(lang.t(Key::PopupPwnedTitle), &[&popup.vm]),
                 Style::new().fg(OK).bold(),
             ))
             .border_style(Style::new().fg(OK));
@@ -425,41 +554,109 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
 
     let fields = popup.buffers.len();
     let height = if fields > 1 { 10 } else { 7 };
-    let height = if popup.notice.is_some() { height + 1 } else { height };
+    let height = if popup.notice.is_some() {
+        height + 1
+    } else {
+        height
+    };
     // Room for the path-completion listing (max 6 candidates + header +
     // overflow notice).
-    let completion_lines =
-        if popup.kind == PopupKind::Download && !popup.completions.is_empty() {
-            1 + popup.completions.len().min(6) + usize::from(popup.completions.len() > 6)
-        } else {
-            0
-        };
+    let completion_lines = if popup.kind == PopupKind::Download && !popup.completions.is_empty() {
+        1 + popup.completions.len().min(6) + usize::from(popup.completions.len() > 6)
+    } else {
+        0
+    };
     let height = height + completion_lines as u16;
     let box_area = popup_area(area, 74, height);
     frame.render_widget(Clear, box_area);
 
+    // Submit-your-VM form: dynamic fields from the cached scraped form.
+    if popup.kind == PopupKind::SubmissionForm {
+        let form_fields = &app.data.submission_form;
+        let mut lines = Vec::new();
+        if let Some(notice) = &popup.notice {
+            lines.push(Line::from(Span::styled(
+                format!("⚠ {notice}"),
+                Style::new().fg(WARN).bold(),
+            )));
+            lines.push(Line::from(""));
+        }
+        let fallback_names: Vec<String> = crate::modules::submissions::fallback_form_fields()
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        for (index, field) in form_fields.iter().enumerate() {
+            let active = index == popup.field;
+            let marker = if active { "▏" } else { "" };
+            let required_mark = if field.required { "*" } else { "" };
+            let raw = popup.buffers.get(index).map(String::as_str).unwrap_or("");
+            let style = if active {
+                Style::new().fg(BRIGHT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().dim()
+            };
+            // Prefer the translated label for known fallback field names;
+            // scraped fields keep their site label.
+            let label = match fallback_names.get(index).map(String::as_str) {
+                Some("vmname") => lang.t(Key::SubmitName),
+                Some("url") => lang.t(Key::SubmitUrl),
+                Some("flaguser") => lang.t(Key::SubmitUserFlag),
+                Some("flagroot") => lang.t(Key::SubmitRootFlag),
+                Some("writeup") => lang.t(Key::SubmitWriteup),
+                Some("tags") => lang.t(Key::SubmitTags),
+                Some("notes") => lang.t(Key::SubmitNotes),
+                Some("level") => lang.t(Key::SubmitLevel),
+                _ => field.label.as_str(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{label}{required_mark} {raw}{marker}"),
+                style,
+            )));
+        }
+        let height = (form_fields.len() as u16 + 5).clamp(8, 22);
+        let box_area = popup_area(area, area.width.saturating_sub(8).max(100), height);
+        frame.render_widget(Clear, box_area);
+        let block = Block::bordered()
+            .title(Span::styled(
+                lang.t(Key::SubmitFormTitle),
+                Style::new().fg(WARN).bold(),
+            ))
+            .title_bottom(Span::styled(
+                lang.t(Key::SubmitFormHint),
+                Style::new().dim(),
+            ))
+            .border_style(Style::new().fg(WARN));
+        frame.render_widget(Paragraph::new(lines).block(block), box_area);
+        return;
+    }
+
     let (title, prompts, hint): (String, Vec<&str>, &str) = match popup.kind {
         PopupKind::Flag => (
-            format!(" Submit flags — {} ", popup.vm),
-            vec!["User flag:", "Root flag:"],
-            "Enter send both · ↑↓/Tab switch field · Esc cancel",
+            super::fmt_key(lang.t(Key::PopupSubmitFlags), &[&popup.vm]),
+            vec![lang.t(Key::PopupUserFlag), lang.t(Key::PopupRootFlag)],
+            lang.t(Key::PopupHintFlag),
         ),
         PopupKind::Upload => (
-            format!(" Submit writeup — {} ", popup.vm),
-            vec!["Writeup URL:"],
-            "Enter send · Esc cancel",
+            super::fmt_key(lang.t(Key::PopupSubmitWriteup), &[&popup.vm]),
+            vec![lang.t(Key::PopupWriteupUrl)],
+            lang.t(Key::PopupHintSend),
         ),
         PopupKind::Download => (
-            format!(" Download — {} ", popup.vm),
-            vec!["Save to:"],
-            "Tab complete path · Enter start · Esc cancel",
+            super::fmt_key(lang.t(Key::PopupDownload), &[&popup.vm]),
+            vec![lang.t(Key::PopupSaveTo)],
+            lang.t(Key::PopupHintDownload),
         ),
         PopupKind::Config => (
-            " Configure HackMyVM ".to_string(),
-            vec!["Username:", "Password:"],
-            "Enter save & connect · ↑↓/Tab switch field · Esc quit",
+            lang.t(Key::PopupConfigure).to_string(),
+            vec![lang.t(Key::PopupUsername), lang.t(Key::PopupPassword)],
+            lang.t(Key::PopupHintConfig),
         ),
-        PopupKind::Account => unreachable!("rendered by the account branch above"),
+        PopupKind::SubmissionForm => {
+            unreachable!("rendered by the submission form branch above")
+        }
+        PopupKind::Account | PopupKind::Rules => {
+            unreachable!("rendered by the branches above")
+        }
     };
 
     let mut lines = Vec::new();
@@ -496,7 +693,10 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
     lines.push(Line::from(""));
     // Path-completion listing (Tab in the Download popup), zsh style.
     if popup.kind == PopupKind::Download && !popup.completions.is_empty() {
-        lines.push(Line::from(Span::styled("  directories:", Style::new().dim())));
+        lines.push(Line::from(Span::styled(
+            lang.t(Key::PopupDirectories),
+            Style::new().dim(),
+        )));
         for name in popup.completions.iter().take(6) {
             lines.push(Line::from(Span::styled(
                 format!("  {name}"),
@@ -506,7 +706,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
         let rest = popup.completions.len().saturating_sub(6);
         if rest > 0 {
             lines.push(Line::from(Span::styled(
-                format!("  … and {rest} more"),
+                super::fmt_key(lang.t(Key::DirectoriesMore), &[&rest.to_string()]),
                 Style::new().dim(),
             )));
         }
@@ -522,8 +722,13 @@ fn draw_popup(frame: &mut Frame, area: Rect, popup: &Popup) {
 
 fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
     let visible = app.visible_releases();
-    let header = Row::new(["Date", "OS", "VM", "Status"])
-        .style(Style::new().fg(ACCENT).bold());
+    let header = Row::new([
+        app.lang.t(Key::ColDate),
+        app.lang.t(Key::ColOs),
+        app.lang.t(Key::ColVm),
+        app.lang.t(Key::ColStatus),
+    ])
+    .style(Style::new().fg(ACCENT).bold());
 
     let rows: Vec<Row> = visible
         .iter()
@@ -557,11 +762,7 @@ fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::new()
-            .bg(HL_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
     .block(filter_block(app));
 
     let mut state = TableState::default().with_selected(Some(app.selected));
@@ -570,7 +771,127 @@ fn draw_releases(frame: &mut Frame, area: Rect, app: &mut AppState) {
     app.set_visible_rows(visible_rows_in(area.height, visible.len()));
 }
 
-fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
+fn draw_submissions(frame: &mut Frame, area: Rect, app: &mut AppState) {
+    let [mine_area, queue_area] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+    let username = app.data.stats.username.to_lowercase();
+
+    // Top: this account's submissions (queue filtered by the account name).
+    let mine: Vec<&crate::modules::submissions::QueueEntry> = app
+        .visible_submissions()
+        .into_iter()
+        .filter(|e| e.user.eq_ignore_ascii_case(&username))
+        .collect();
+    let mine_header = Row::new([
+        app.lang.t(Key::ColVm),
+        app.lang.t(Key::ColLevel),
+        app.lang.t(Key::ColStatus),
+        app.lang.t(Key::ColDate),
+    ])
+    .style(Style::new().fg(ACCENT).bold());
+    let mine_rows: Vec<Row> = mine
+        .iter()
+        .map(|e| {
+            let status = e.status.to_uppercase();
+            let status_span = if status.contains("ACCEPT") {
+                Span::styled(status, Style::new().fg(OK).bold())
+            } else if status.contains("REJECT") {
+                Span::styled(status, Style::new().fg(BAD))
+            } else {
+                Span::styled(status, Style::new().fg(WARN))
+            };
+            Row::new([
+                Span::styled(e.name.clone(), Style::new().fg(BRIGHT)),
+                Span::raw(e.level.clone()),
+                status_span,
+                Span::styled(e.date.clone(), Style::new().dim()),
+            ])
+        })
+        .collect();
+    let mine_count = format!(
+        " {} {}/{} ",
+        app.lang.t(Key::TabSubmissions),
+        mine.len(),
+        app.data.submissions.len()
+    );
+    let mine_table = Table::new(
+        mine_rows,
+        [
+            Constraint::Length(20),
+            Constraint::Length(10),
+            Constraint::Length(14),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(mine_header)
+    .row_highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
+    .block(
+        Block::bordered()
+            .title(Span::styled(
+                app.lang.t(Key::MySubmissionsTitle),
+                Style::new().fg(ACCENT).bold(),
+            ))
+            .title_bottom(Span::styled(mine_count, Style::new().dim()))
+            .border_style(Style::new().dim()),
+    );
+    let mut mine_state = TableState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(mine_table, mine_area, &mut mine_state);
+
+    // Bottom: the whole queue with the submitting user visible.
+    let queue_header = Row::new([
+        app.lang.t(Key::ColUser),
+        app.lang.t(Key::ColVm),
+        app.lang.t(Key::ColStatus),
+        app.lang.t(Key::ColLevel),
+        app.lang.t(Key::ColDate),
+    ])
+    .style(Style::new().fg(ACCENT).bold());
+    let queue_rows: Vec<Row> = app
+        .data
+        .submissions
+        .iter()
+        .map(|e| {
+            let status = e.status.to_uppercase();
+            let status_span = if status.contains("ACCEPT") {
+                Span::styled(status, Style::new().fg(OK))
+            } else {
+                Span::styled(status, Style::new().fg(WARN))
+            };
+            Row::new([
+                Span::styled(e.user.clone(), Style::new().fg(BRIGHT)),
+                Span::raw(e.name.clone()),
+                status_span,
+                Span::raw(e.level.clone()),
+                Span::styled(e.date.clone(), Style::new().dim()),
+            ])
+        })
+        .collect();
+    let queue_table = Table::new(
+        queue_rows,
+        [
+            Constraint::Length(16),
+            Constraint::Length(20),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(queue_header)
+    .block(
+        Block::bordered()
+            .title(Span::styled(
+                app.lang.t(Key::QueueTitle),
+                Style::new().fg(ACCENT).bold(),
+            ))
+            .border_style(Style::new().dim()),
+    );
+    frame.render_widget(queue_table, queue_area);
+
+    app.set_visible_rows(visible_rows_in(mine_area.height, mine.len()));
+}
+
+fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport, lang: &crate::i18n::Lang) {
     let height = (report.entries.len() as u16 + 4).clamp(5, 12);
     let width = 60;
     let box_area = Rect {
@@ -592,9 +913,9 @@ fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
         lines.push(Line::from(""));
     }
     let footer_hint = if report.changed {
-        "Data will refresh on close · Enter / Esc close"
+        lang.t(Key::ReportHintRefresh)
     } else {
-        "Enter / Esc close"
+        lang.t(Key::ReportHintClose)
     };
     lines.push(Line::from(Span::styled(footer_hint, Style::new().dim())));
 
@@ -608,7 +929,12 @@ fn draw_report(frame: &mut Frame, area: Rect, report: &ActionReport) {
     frame.render_widget(Paragraph::new(lines).block(block), box_area);
 }
 
-fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
+fn draw_writeups_popup(
+    frame: &mut Frame,
+    area: Rect,
+    popup: &WriteupsPopup,
+    lang: &crate::i18n::Lang,
+) {
     let rows: Vec<Row> = popup
         .entries
         .iter()
@@ -639,10 +965,16 @@ fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
     let box_area = popup_area(area, width, height);
     frame.render_widget(Clear, box_area);
 
-    let header = Row::new(["Date", "Author (Poet)", "Language", "Format", "Link"])
-        .style(Style::new().fg(ACCENT).bold());
-    let hint = Row::new([" ", " ", " ", " ", "Enter open link · jk select · Esc close"])
-        .style(Style::new().dim());
+    let header = Row::new([
+        lang.t(Key::ColDate),
+        lang.t(Key::ColAuthor),
+        lang.t(Key::ColLanguage),
+        lang.t(Key::ColFormat),
+        lang.t(Key::ColLink),
+    ])
+    .style(Style::new().fg(ACCENT).bold());
+    let hint =
+        Row::new([" ", " ", " ", " ", lang.t(Key::WriteupsPopupHint)]).style(Style::new().dim());
 
     let table = Table::new(
         rows,
@@ -656,15 +988,11 @@ fn draw_writeups_popup(frame: &mut Frame, area: Rect, popup: &WriteupsPopup) {
     )
     .header(header)
     .footer(hint)
-    .row_highlight_style(
-        Style::new()
-            .bg(HL_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(Style::new().bg(HL_BG).add_modifier(Modifier::BOLD))
     .block(
         Block::bordered()
             .title(Span::styled(
-                format!(" Writeups — {} ", popup.vm),
+                super::fmt_key(lang.t(Key::WriteupsPopupTitle), &[&popup.vm]),
                 Style::new().fg(ACCENT).bold(),
             ))
             .border_style(Style::new().fg(ACCENT)),
@@ -692,7 +1020,7 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
     let mut lines: Vec<Line> = Vec::new();
     if jobs == 0 {
         lines.push(Line::from(Span::styled(
-            "No downloads yet — press d on a machine.",
+            app.lang.t(Key::DownloadsEmpty),
             Style::new().dim(),
         )));
     }
@@ -720,7 +1048,7 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
             Phase::Resolving => Line::from(vec![
                 marker,
                 Span::styled(
-                    format!("… {}  resolving MEGA link…", job.vm),
+                    super::fmt_key(app.lang.t(Key::DownloadsResolving), &[&job.vm]).to_string(),
                     Style::new().dim(),
                 ),
             ]),
@@ -777,13 +1105,13 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "o close (downloads keep running) · c cancel latest · q quit warns while active",
+        app.lang.t(Key::DownloadsHint),
         Style::new().dim(),
     )));
 
     let block = Block::bordered()
         .title(Span::styled(
-            " Downloads ",
+            app.lang.t(Key::DownloadsTitle),
             Style::new().fg(WARN).bold(),
         ))
         .border_style(Style::new().fg(WARN));
@@ -791,39 +1119,80 @@ fn draw_downloads(frame: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &AppState) {
-    let [keys_area, status_area] = Layout::horizontal([
-        Constraint::Min(80),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
+    let [keys_area, status_area] =
+        Layout::horizontal([Constraint::Min(80), Constraint::Fill(1)]).areas(area);
 
     let keys: String = if app.popup.is_some() {
         match app.popup.as_ref().map(|p| p.kind) {
-            Some(PopupKind::Config) => "Enter save & connect · Esc quit".to_string(),
-            Some(PopupKind::Account) => "Enter switch account · l logout · Esc close".to_string(),
-            _ => "Enter send · ↑↓/Tab switch field · Esc cancel".to_string(),
+            Some(PopupKind::Config) => app.lang.t(Key::PopupHintConfig).to_string(),
+            Some(PopupKind::Account) => app.lang.t(Key::PopupAccountHint).to_string(),
+            _ => app.lang.t(Key::PopupHintFlag).to_string(),
         }
     } else {
         match app.input_mode {
-            InputMode::Filter => "Enter confirm · Esc clear & exit filter".to_string(),
+            InputMode::Filter => app.lang.t(Key::FooterFilterMode).to_string(),
             InputMode::Normal => {
                 let list_keys = match app.tab {
                     Tab::Stats => String::new(),
-                    Tab::Writeups => "jk move · / filter · Enter open · ".to_string(),
-                    Tab::Pending => "jk move · / filter · u writeup · ".to_string(),
-                    Tab::Machines => "jk move · / filter · s size sort · f flag · d download · ".to_string(),
-                    Tab::Releases => "jk move · / filter · ".to_string(),
+                    Tab::Writeups => format!(
+                        "{} · {} · {} · ",
+                        app.lang.t(Key::FooterJkMove),
+                        app.lang.t(Key::FooterFilter),
+                        app.lang.t(Key::FooterEnterOpen)
+                    ),
+                    Tab::Pending => format!(
+                        "{} · {} · {} · ",
+                        app.lang.t(Key::FooterJkMove),
+                        app.lang.t(Key::FooterFilter),
+                        app.lang.t(Key::FooterWriteup)
+                    ),
+                    Tab::Machines => format!(
+                        "{} · {} · {} · {} · {} · {} · ",
+                        app.lang.t(Key::FooterJkMove),
+                        app.lang.t(Key::FooterFilter),
+                        app.lang.t(Key::FooterSizeSort),
+                        app.lang.t(Key::FooterHidePwned),
+                        app.lang.t(Key::FooterFlag),
+                        app.lang.t(Key::FooterDownload)
+                    ),
+                    Tab::Releases => format!(
+                        "{} · {} · ",
+                        app.lang.t(Key::FooterJkMove),
+                        app.lang.t(Key::FooterFilter)
+                    ),
+                    Tab::Submissions => format!(
+                        "{} · {} · {} · {} · ",
+                        app.lang.t(Key::FooterJkMove),
+                        app.lang.t(Key::FooterFilter),
+                        app.lang.t(Key::FooterSubmitVm),
+                        app.lang.t(Key::FooterRules)
+                    ),
                 };
-                let common = "a account · r refresh · q quit";
+                let common = format!(
+                    "{} · {} · {}: {} · {}",
+                    app.lang.t(Key::FooterAccount),
+                    app.lang.t(Key::FooterRefresh),
+                    app.lang.t(Key::FooterLangHint),
+                    app.lang.other().label(),
+                    app.lang.t(Key::FooterQuit)
+                );
                 if list_keys.is_empty() {
-                    format!("Tab switch · {common}")
+                    format!("{} · {}", app.lang.t(Key::FooterTabSwitch), common)
                 } else {
-                    format!("Tab · {list_keys}{common}")
+                    format!(
+                        "{} · {}{}",
+                        app.lang.t(Key::FooterTabSwitch),
+                        list_keys,
+                        common
+                    )
                 }
             }
         }
     };
-    frame.render_widget(Paragraph::new(Span::styled(keys, Style::new().dim())), keys_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(keys, Style::new().dim())),
+        keys_area,
+    );
 
     let status = if let Some(label) = &app.fetching {
         Span::styled(format!("⟳ {label}"), Style::new().fg(WARN).bold())

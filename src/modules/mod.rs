@@ -5,6 +5,7 @@ pub mod machines;
 pub mod releases;
 pub mod session;
 pub mod stats;
+pub mod submissions;
 pub mod writeups;
 
 use thiserror::Error;

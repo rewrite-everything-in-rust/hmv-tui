@@ -61,7 +61,9 @@ pub fn derive_file_keys(raw_key: &str) -> Result<FileKeys> {
     }
 
     let words: Vec<u32> = bytes
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
 
@@ -243,7 +245,9 @@ impl ChunkedMac {
 
         let words: Vec<u32> = self
             .mac_state
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         let actual = (words[0] ^ words[1], words[2] ^ words[3]);

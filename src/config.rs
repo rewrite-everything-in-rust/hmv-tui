@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
+
 const SERVICE_NAME: &str = "hmv-cli";
 const CONFIG_DIR_NAME: &str = ".hmv";
 const CONFIG_FILE_NAME: &str = "config.json";
@@ -19,6 +21,8 @@ struct ConfigFile {
     username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lang: Option<String>,
 }
 
 pub struct ConfigManager {
@@ -64,6 +68,28 @@ impl ConfigManager {
         let cfg = ConfigFile {
             username: self.read_username().ok(),
             download_dir: Some(dir.display().to_string()),
+            lang: self.read_config().and_then(|c| c.lang),
+        };
+        fs::write(&self.config_file, serde_json::to_string(&cfg)?)
+            .with_context(|| "Failed to write configuration file")?;
+        Ok(())
+    }
+
+    /// Persisted UI language; defaults to English.
+    pub fn language(&self) -> Lang {
+        self.read_config()
+            .and_then(|cfg| cfg.lang)
+            .map(|raw| Lang::from_config(&raw))
+            .unwrap_or_default()
+    }
+
+    /// Persists the UI language, preserving every other field.
+    pub fn save_language(&self, lang: Lang) -> Result<()> {
+        let prev = self.read_config();
+        let cfg = ConfigFile {
+            username: prev.as_ref().and_then(|c| c.username.clone()),
+            download_dir: prev.as_ref().and_then(|c| c.download_dir.clone()),
+            lang: Some(lang.to_config().to_string()),
         };
         fs::write(&self.config_file, serde_json::to_string(&cfg)?)
             .with_context(|| "Failed to write configuration file")?;
@@ -74,13 +100,15 @@ impl ConfigManager {
     /// preserving the saved download directory. Called only after a
     /// successful login so the vault never holds invalid credentials.
     pub fn save_credentials(&self, username: &str, password: &str) -> Result<()> {
-        let download_dir = self.read_config().and_then(|cfg| cfg.download_dir);
+        let prev = self.read_config();
+        let download_dir = prev.as_ref().and_then(|cfg| cfg.download_dir.clone());
+        let lang = prev.as_ref().and_then(|cfg| cfg.lang.clone());
         let json = serde_json::to_string(&ConfigFile {
             username: Some(username.to_string()),
             download_dir,
+            lang,
         })?;
-        fs::write(&self.config_file, json)
-            .with_context(|| "Failed to write configuration file")?;
+        fs::write(&self.config_file, json).with_context(|| "Failed to write configuration file")?;
 
         let entry = self.keyring_entry(username)?;
         entry
@@ -104,13 +132,15 @@ impl ConfigManager {
             }
         }
 
-        let download_dir = self.read_config().and_then(|cfg| cfg.download_dir);
+        let prev = self.read_config();
+        let download_dir = prev.as_ref().and_then(|cfg| cfg.download_dir.clone());
+        let lang = prev.as_ref().and_then(|cfg| cfg.lang.clone());
         let json = serde_json::to_string(&ConfigFile {
             username: None,
             download_dir,
+            lang,
         })?;
-        fs::write(&self.config_file, json)
-            .with_context(|| "Failed to write configuration file")?;
+        fs::write(&self.config_file, json).with_context(|| "Failed to write configuration file")?;
         Ok(())
     }
 

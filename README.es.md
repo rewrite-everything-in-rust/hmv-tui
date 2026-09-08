@@ -31,11 +31,14 @@ Interfaz con tema Nord, dificultades con colores, medidores de progreso en vivo 
 * **Un solo comando** — `hmv` abre el dashboard: tus estadísticas, writeups aceptados, writeups pendientes, el catálogo completo de máquinas y las descargas en una sola pantalla.
 * **Gestión de cuenta en la app** — primer arranque, cambio de cuenta y cierre de sesión desde el popup de cuenta (`a`); las credenciales se validan con un login real antes de guardar nada.
 * **Auth segura** — la contraseña vive en la bóveda del sistema (Secret Service en Linux, Credential Manager en Windows, Keychain en macOS) vía `keyring`. Solo el usuario y la última carpeta de descargas tocan `~/.hmv/config.json`.
-* **Catálogo de máquinas** — más de 370 máquinas con dificultad en colores, filtrado instantáneo con `/` (nombre, dificultad, creador, estado) y ordenación por tamaño (`s`: menor ↔ mayor).
+* **Catálogo de máquinas** — más de 370 máquinas con dificultad en colores, filtrado instantáneo con `/` (nombre, dificultad, creador, estado), ordenación por tamaño (`s`: menor ↔ mayor) y alternador para ocultar PWNED (`h`).
+* **Columnas de SO e hipervisor** — cada máquina muestra su SO (linux/windows) y los hipervisores en los que fue probada (VirtualBox / VMware), extraídos directamente del catálogo.
 * **Descargas rápidas** — las VMs fluyen directamente de MEGA, hasta **2 en paralelo** (las demás en cola), descifradas al vuelo (AES-128-CTR) y **verificadas con el MAC por chunks de MEGA** antes de salir del archivo `.part`.
 * **Envío de flags** — popup dual de flag user/root (`f`), ambos campos enviados en paralelo; consciente del estado (las máquinas PWNED muestran un recuadro de solo lectura, las DONE un aviso de "falta una").
 * **Writeups** — lee los writeups de la comunidad (`w`) y envía el tuyo (`u`) cuando tengas ambas flags.
+* **Envíos** — pestaña dedicada para tus propias VMs: envía una VM (`v`) con un formulario dinámico (nombre, URL de descarga, flags user/root, tags, selector de nivel, notas), consulta la cola de envíos y lee las reglas (`i`).
 * **Calendario de releases** — próximas máquinas de HackMyVM con estado RELEASED / UPCOMING.
+* **UI bilingüe** — cambia todo el dashboard entre inglés y español con una sola tecla (`l`); la elección se conserva entre sesiones.
 
 ---
 
@@ -105,10 +108,7 @@ En la primera ejecución (o cuando la contraseña guardada deje de funcionar) el
 Las credenciales se validan con un login real **antes** de guardar nada. Si el login falla, el popup se vuelve a abrir con tu usuario intacto; `Esc` sale de la app.
 
 ---
-
-## Guía de uso
-
-Cinco pestañas manejadas por teclado — `Stats`, `Writeups`, `Pending`, `Machines` y `Releases`:
+Seis pestañas manejadas por teclado — `Stats`, `Writeups`, `Pending`, `Machines`, `Releases` y `Submissions`:
 
 | Teclas | Acción |
 | :--- | :--- |
@@ -117,11 +117,15 @@ Cinco pestañas manejadas por teclado — `Stats`, `Writeups`, `Pending`, `Machi
 | `g` / `Home` | Ir al inicio de la lista |
 | `/` | Filtrar la lista actual (escribe para filtrar, `Enter` lo mantiene, `Esc` limpia y sale) |
 | `a` | **Popup de cuenta** — muestra la cuenta activa: `Enter` abre el popup de login para cambiar de cuenta, `l` cierra sesión, `Esc` cierra |
+| `l` | **Cambiar idioma de la UI** — inglés ↔ español, en todas partes, se conserva entre sesiones |
 | `s` | **Solo Machines** — ciclo de orden por tamaño: orden del sitio → menor primero → mayor primero |
+| `h` | **Solo Machines** — alternar ocultar máquinas totalmente PWNED (pulsa otra vez para mostrarlas) |
 | `f` | **Solo Machines** — popup de flags con campos User y Root (rellena uno o ambos, enviados en paralelo). Los resultados aparecen en un popup (`✓ ACCEPTED` / `✗ REJECTED` por campo); los datos se refrescan al cerrarlo. Consciente del estado: las máquinas PWNED muestran un recuadro de solo lectura "Already PWNED", las con una flag muestran un aviso de "falta una". |
 | `d` | **Solo Machines** — popup de descarga: elige la carpeta de destino (se recuerda entre sesiones, con autocompletado de rutas `Tab` al estilo zsh), enlace de MEGA resuelto automáticamente y descarga en streaming con progreso en vivo en el overlay de Descargas. Verificado con MAC antes de terminar. |
 | `w` | **Machines y Pending** — popup de writeups de la comunidad de la máquina seleccionada: `j`/`k` para seleccionar, `Enter` abre el enlace en tu navegador, `Esc` cierra. |
 | `u` | **Solo Pending** — envía la URL de un writeup para la máquina pwned (también con popup de resultado). |
+| `v` | **Solo Submissions** — popup de envío de tu VM: nombre, URL de descarga, flags user/root, tags, nivel (`←`/`→` cicla Fácil → Media → Difícil), notas (opcional). Todos los campos obligatorios deben estar llenos antes de enviar. |
+| `i` | **Solo Submissions** — lee las reglas de envío en un popup amplio. |
 | `o` | Alternar el overlay de **Descargas** (medidores en vivo, velocidad, rutas finales). Cerrarlo nunca detiene las descargas en curso. |
 | `c` | **En el overlay de Descargas** — cancelar la descarga activa más reciente (el `.part` temporal se limpia). |
 | `Enter` | Abre en tu navegador el writeup seleccionado (pestaña **Writeups** y popup de writeups). |
@@ -142,7 +146,7 @@ Las descargas corren en segundo plano (máx. 2 en paralelo, las demás en cola):
 
 ### Dónde viven tus datos
 
-- `~/.hmv/config.json` — tu usuario y la última carpeta de descargas. Nada más.
+- `~/.hmv/config.json` — tu usuario, la última carpeta de descargas y el idioma de la UI (`"lang": "en" | "es"`). Nada más.
 - Bóveda del sistema — tu contraseña, bajo el servicio `hmv-cli`. Nunca en disco en texto plano.
 
 ---

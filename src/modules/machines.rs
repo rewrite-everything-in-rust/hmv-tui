@@ -14,6 +14,9 @@ pub struct Machine {
     pub size: String,
     pub difficulty: String,
     pub os: String,
+    /// Hypervisors the machine is tested on, e.g. "VirtualBox/VMware"
+    /// (scraped from the row text; empty when the site lists none).
+    pub tested: String,
     pub status: String,
 }
 
@@ -71,7 +74,11 @@ impl MachineScraper {
 }
 
 /// Pure parsing function so it can be unit-tested against fixture HTML.
-pub fn parse_machines(html: &str, page: usize, colors: &HashMap<&'static str, &'static str>) -> Page {
+pub fn parse_machines(
+    html: &str,
+    page: usize,
+    colors: &HashMap<&'static str, &'static str>,
+) -> Page {
     let doc = scraper::Html::parse_document(html);
 
     let row_sel = scraper::Selector::parse("table.table-dark tbody tr").unwrap();
@@ -130,6 +137,27 @@ pub fn parse_machines(html: &str, page: usize, colors: &HashMap<&'static str, &'
             }
         }
 
+        // Hypervisor compatibility: the row carries icon images whose src
+        // encodes the tested hypervisor(s):
+        //   /img/vb.png    -> tested on VirtualBox only
+        //   /img/vbvm.png  -> tested on VirtualBox and VMware
+        let mut hypervisors: Vec<&str> = Vec::new();
+        for img in row.select(&img_sel) {
+            let src = img.value().attr("src").unwrap_or("").to_lowercase();
+            if src.ends_with("/vb.png") || src == "vb.png" {
+                if !hypervisors.contains(&"VirtualBox") {
+                    hypervisors.push("VirtualBox");
+                }
+            } else if src.ends_with("/vbvm.png") || src == "vbvm.png" {
+                if !hypervisors.contains(&"VirtualBox") {
+                    hypervisors.push("VirtualBox");
+                }
+                if !hypervisors.contains(&"VMware") {
+                    hypervisors.push("VMware");
+                }
+            }
+        }
+
         machines.push(Machine {
             name: name_node.text().collect::<String>().trim().to_string(),
             creator: row
@@ -147,6 +175,7 @@ pub fn parse_machines(html: &str, page: usize, colors: &HashMap<&'static str, &'
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".into()),
             os: os_type.to_string(),
+            tested: hypervisors.join("/"),
             status: status.to_string(),
         });
     }
@@ -180,5 +209,56 @@ mod tests {
         assert_eq!(size_mb("1.5 gb"), 1536.0);
         assert_eq!(size_mb("garbage"), 0.0);
         assert_eq!(size_mb(""), 0.0);
+    }
+
+    const ROW_FIXTURE: &str = r##"
+    <html><body><table class="table-dark"><tbody>
+    <tr>
+      <td><div style="border-top: solid #28a745"></div>
+          <h4 class="vmname"><a href="#">Easy</a></h4>
+          <img class="ml-2 mr-2" src="/img/linux.png" title="Linux VM" width="25" height="25">
+          <img class="ml-2" src="../img/vb.png" title="Tested on VirtualBox">
+          <a class="creator">tom</a>
+          <p class="size">450 Mb</p>
+          <span class="badge">TO HACK</span></td>
+    </tr>
+    <tr>
+      <td><div style="border-top: solid #dc3545"></div>
+          <h4 class="vmname"><a href="#">Hard</a></h4>
+          <img class="ml-2 mr-2" src="/img/windows.png" title="Windows VM" width="25" height="25">
+          <img class="ml-2" src="/img/vbvm.png" title="Tested on VirtualBox and VMWare.">
+          <a class="creator">someone</a>
+          <p class="size">1.9 Gb</p>
+          <span class="badge">PWNED</span></td>
+    </tr>
+    <tr>
+      <td><div style="border-top: solid #ffc107"></div>
+          <h4 class="vmname"><a href="#">Medium</a></h4>
+          <img class="ml-2 mr-2" src="/img/linux.png" title="Linux VM" width="25" height="25">
+          <a class="creator">third</a>
+          <p class="size">800 Mb</p>
+          <span class="badge">TO HACK</span></td>
+    </tr>
+    </tbody></table></body></html>"##;
+
+    #[test]
+    fn parses_os_and_tested_from_row() {
+        let page = parse_machines(ROW_FIXTURE, 1, &color_map());
+        assert_eq!(page.machines.len(), 3);
+
+        let easy = &page.machines[0];
+        assert_eq!(easy.name, "Easy");
+        assert_eq!(easy.os, "linux");
+        assert_eq!(easy.difficulty, "beginner");
+        assert_eq!(easy.tested, "VirtualBox");
+
+        let hard = &page.machines[1];
+        assert_eq!(hard.os, "windows");
+        assert_eq!(hard.status, "PWNED");
+        assert_eq!(hard.tested, "VirtualBox/VMware");
+
+        let medium = &page.machines[2];
+        assert_eq!(medium.os, "linux");
+        assert_eq!(medium.tested, "", "row without hypervisor icon stays empty");
     }
 }

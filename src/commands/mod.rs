@@ -6,13 +6,13 @@ pub mod machine;
 use anyhow::Result;
 
 use crate::config::ConfigManager;
-use crate::modules::HmvError;
 use crate::modules::flag::FlagManager;
 use crate::modules::machines::MachineScraper;
 use crate::modules::releases::ReleaseScraper;
 use crate::modules::session::{login, login_with, HmvSession};
 use crate::modules::stats::StatsManager;
 use crate::modules::writeups::WriteupManager;
+use crate::modules::HmvError;
 use crate::tui::{ActionReport, TuiAction, TuiData};
 
 /// Reusable authenticated session for the TUI's lifetime. Cloning an
@@ -82,49 +82,64 @@ pub async fn tui_cmd() -> Result<()> {
     let writeups_sessions = shared.clone();
     let config_sessions = shared.clone();
     let logout_sessions = shared.clone();
-
+    let submissions_sessions = shared.clone();
+    let lang = cfg.language();
     let initial = if unconfigured {
-        crate::tui::AppState::unconfigured(stored_username.as_deref())
+        crate::tui::AppState::unconfigured_with_lang(stored_username.as_deref(), lang)
     } else {
-        crate::tui::AppState::loading()
+        crate::tui::AppState::loading_with_lang(lang)
     };
 
+    // The closures now run on background threads inside the TUI, so grab
+    // the multi-thread runtime handle here (we are inside #[tokio::main])
+    // and block on it from those threads — no block_in_place needed.
+    let handle = tokio::runtime::Handle::current();
     crate::tui::run(
         initial,
-        move || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let sessions = take_session(&fetch_sessions)?;
-                    fetch_tui_data(&sessions).await
+        {
+            let handle = handle.clone();
+            move || {
+                let sessions = take_session(&fetch_sessions)?;
+                handle.block_on(fetch_tui_data(&sessions))
+            }
+        },
+        {
+            let handle = handle.clone();
+            move |action| {
+                let sessions = take_session(&action_sessions)?;
+                handle.block_on(run_tui_action(&sessions, action))
+            }
+        },
+        {
+            let handle = handle.clone();
+            move |vm| {
+                let sessions = take_session(&writeups_sessions)?;
+                handle.block_on(async { WriteupManager::new(sessions.session()).fetch(vm).await })
+            }
+        },
+        {
+            let handle = handle.clone();
+            move |username, password| {
+                handle.block_on(configure_account(&config_sessions, username, password))
+            }
+        },
+        {
+            let handle = handle.clone();
+            move || handle.block_on(logout_account(&logout_sessions))
+        },
+        {
+            let handle = handle.clone();
+            move || {
+                let sessions = take_session(&submissions_sessions)?;
+                handle.block_on(async {
+                    let manager =
+                        crate::modules::submissions::SubmissionManager::new(sessions.session());
+                    let queue = manager.fetch_queue(None).await.unwrap_or_default();
+                    let rules = manager.fetch_rules().await.ok();
+                    let form = manager.fetch_form().await.unwrap_or_default();
+                    Ok((queue, rules, form))
                 })
-            })
-        },
-        move |action| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let sessions = take_session(&action_sessions)?;
-                    run_tui_action(&sessions, action).await
-                })
-            })
-        },
-        move |vm| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let sessions = take_session(&writeups_sessions)?;
-                    WriteupManager::new(sessions.session()).fetch(vm).await
-                })
-            })
-        },
-        move |username, password| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(configure_account(&config_sessions, username, password))
-            })
-        },
-        move || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(logout_account(&logout_sessions))
-            })
+            }
         },
     )
 }
@@ -161,13 +176,64 @@ async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<Ac
         crate::tui::PopupKind::Download
             | crate::tui::PopupKind::Config
             | crate::tui::PopupKind::Account
+            | crate::tui::PopupKind::Rules
     ) {
         anyhow::bail!("downloads, configuration and logout are handled directly by the event loop");
     }
     match action.kind {
         crate::tui::PopupKind::Download
         | crate::tui::PopupKind::Config
-        | crate::tui::PopupKind::Account => unreachable!("handled by the event loop"),
+        | crate::tui::PopupKind::Account
+        | crate::tui::PopupKind::Rules => unreachable!("handled by the event loop"),
+        crate::tui::PopupKind::SubmissionForm => {
+            use crate::i18n::Key;
+            use crate::tui::{ActionReport, ReportKind};
+            let lang = crate::config::ConfigManager::new().language();
+            let manager = crate::modules::submissions::SubmissionManager::new(sessions.session());
+            let fields: Vec<(String, String)> = action
+                .values
+                .iter()
+                .map(|(index, value)| {
+                    (
+                        crate::modules::submissions::fallback_form_fields()
+                            .get(*index)
+                            .map(|f| f.name.clone())
+                            .unwrap_or_else(|| format!("field{index}")),
+                        value.clone(),
+                    )
+                })
+                .collect();
+            let verdict = manager.submit(&fields).await?;
+            let (entries, changed, status) = match verdict {
+                crate::modules::submissions::SubmitVerdict::Submitted => (
+                    vec![(ReportKind::Success, lang.t(Key::SubmitOk).to_string())],
+                    true,
+                    lang.t(Key::SubmitOk).to_string(),
+                ),
+                crate::modules::submissions::SubmitVerdict::Rejected(reason) => (
+                    vec![(
+                        ReportKind::Failure,
+                        crate::tui::fmt_key(lang.t(Key::SubmitFailed), &[&reason]),
+                    )],
+                    false,
+                    crate::tui::fmt_key(lang.t(Key::SubmitFailed), &[&reason]),
+                ),
+                crate::modules::submissions::SubmitVerdict::Unknown(body) => (
+                    vec![(
+                        ReportKind::Info,
+                        crate::tui::fmt_key(lang.t(Key::SubmitUnknown), &[&body]),
+                    )],
+                    false,
+                    crate::tui::fmt_key(lang.t(Key::SubmitUnknown), &[&body]),
+                ),
+            };
+            Ok(ActionReport {
+                title: crate::tui::fmt_key(lang.t(Key::SubmitFormTitle), &[&action.vm]),
+                entries,
+                changed,
+                status,
+            })
+        }
         crate::tui::PopupKind::Flag => {
             use crate::modules::flag::FlagVerdict;
 
@@ -193,49 +259,73 @@ async fn run_tui_action(sessions: &SessionCache, action: TuiAction) -> Result<Ac
                 .into_iter()
                 .collect::<Result<Vec<(usize, FlagVerdict)>>>()?;
 
-            Ok(crate::tui::build_flag_report(&action.vm, results))
+            let lang = crate::config::ConfigManager::new().language();
+            Ok(crate::tui::build_flag_report(lang, &action.vm, results))
         }
         crate::tui::PopupKind::Upload => {
             let url = action.values[0].1.clone();
+            let lang = crate::config::ConfigManager::new().language();
+            use crate::tui::{ActionReport, ReportKind};
             let verdict = WriteupManager::new(sessions.session())
                 .submit(&action.vm, &url)
                 .await?;
-            use crate::tui::{ActionReport, ReportKind};
+            use crate::modules::writeups::UploadVerdict;
             let (entries, changed, status) = match verdict {
-                crate::modules::writeups::UploadVerdict::Submitted => (
+                UploadVerdict::Submitted => (
                     vec![(
                         ReportKind::Success,
-                        format!("Writeup: ✓ ACCEPTED — {}", url),
+                        crate::tui::fmt_key(
+                            lang.t(crate::i18n::Key::ReportWriteupAccepted),
+                            &[&url],
+                        ),
                     )],
                     true,
                     format!("[✓] Writeup submitted for {}!", action.vm),
                 ),
-                crate::modules::writeups::UploadVerdict::Repeated => (
-                    vec![(ReportKind::Info, "Writeup: [=] ALREADY SUBMITTED".to_string())],
+                UploadVerdict::Repeated => (
+                    vec![(
+                        ReportKind::Info,
+                        lang.t(crate::i18n::Key::ReportWriteupRepeated).to_string(),
+                    )],
                     false,
                     format!("[=] Writeup for {} was already submitted.", action.vm),
                 ),
-                crate::modules::writeups::UploadVerdict::Rejected => (
+                UploadVerdict::Rejected => (
                     vec![(
                         ReportKind::Failure,
-                        "Writeup: ✗ REJECTED — flags missing?".to_string(),
+                        lang.t(crate::i18n::Key::ReportWriteupRejected).to_string(),
                     )],
                     false,
                     format!("[!] Server rejected writeup for {}.", action.vm),
                 ),
-                crate::modules::writeups::UploadVerdict::NotFound => (
-                    vec![(ReportKind::Failure, format!("Machine '{}' not found", action.vm))],
+                UploadVerdict::NotFound => (
+                    vec![(
+                        ReportKind::Failure,
+                        crate::tui::fmt_key(
+                            lang.t(crate::i18n::Key::ReportMachineNotFound),
+                            &[&action.vm],
+                        ),
+                    )],
                     false,
                     format!("[!] Machine '{}' not found.", action.vm),
                 ),
-                crate::modules::writeups::UploadVerdict::Unknown(ref body) => (
-                    vec![(ReportKind::Info, format!("Unknown response: {body}"))],
+                UploadVerdict::Unknown(body) => (
+                    vec![(
+                        ReportKind::Info,
+                        crate::tui::fmt_key(
+                            lang.t(crate::i18n::Key::ReportUnknownResponse),
+                            &[&body],
+                        ),
+                    )],
                     false,
                     format!("[?] Unknown response: {body}"),
                 ),
             };
             Ok(ActionReport {
-                title: format!(" Writeup results — {} ", action.vm),
+                title: crate::tui::fmt_key(
+                    lang.t(crate::i18n::Key::WriteupResultsTitle),
+                    &[&action.vm],
+                ),
                 entries,
                 changed,
                 status,
@@ -289,20 +379,38 @@ async fn fetch_tui_data(sessions: &SessionCache) -> Result<TuiData> {
         .await
         .unwrap_or_default();
 
+    // Submission queue + rules are nice-to-have: failures degrade to an
+    // empty tab instead of blanking out the dashboard.
+    let submissions = crate::modules::submissions::SubmissionManager::new(session.clone());
+    let queue = submissions.fetch_queue(None).await.unwrap_or_default();
+    let rules = submissions.fetch_rules().await.ok();
+    let form = submissions.fetch_form().await.unwrap_or_default();
+
     Ok(TuiData {
         stats,
         progress: vec![
             ("Total VMs".to_string(), pwned_vms, total_vms),
-            ("Beginner".to_string(), difficulty("beginner").0, difficulty("beginner").1),
+            (
+                "Beginner".to_string(),
+                difficulty("beginner").0,
+                difficulty("beginner").1,
+            ),
             (
                 "Intermediate".to_string(),
                 difficulty("intermediate").0,
                 difficulty("intermediate").1,
             ),
-            ("Advanced".to_string(), difficulty("advanced").0, difficulty("advanced").1),
+            (
+                "Advanced".to_string(),
+                difficulty("advanced").0,
+                difficulty("advanced").1,
+            ),
         ],
         pending,
         catalog,
         releases,
+        submissions: queue,
+        submission_form: form,
+        rules,
     })
 }

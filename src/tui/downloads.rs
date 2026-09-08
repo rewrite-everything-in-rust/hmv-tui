@@ -58,8 +58,7 @@ impl DownloadState {
         if let Some(last) = self.last_time {
             let dt = now.duration_since(last).as_secs_f64();
             if dt >= 0.25 {
-                self.speed_bps =
-                    (bytes.saturating_sub(self.last_bytes) as f64 / dt) as u64;
+                self.speed_bps = (bytes.saturating_sub(self.last_bytes) as f64 / dt) as u64;
                 self.last_bytes = bytes;
                 self.last_time = Some(now);
             }
@@ -154,11 +153,7 @@ pub fn start_download(vm: String, dest_dir: PathBuf) -> Result<DownloadJob> {
         }
     });
 
-    Ok(DownloadJob {
-        vm,
-        state,
-        cancel,
-    })
+    Ok(DownloadJob { vm, state, cancel })
 }
 
 /// Human-readable byte size: "0 B", "842.1 KB", "1.9 GB", ...

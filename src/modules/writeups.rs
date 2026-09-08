@@ -68,17 +68,19 @@ impl WriteupManager {
             .await?;
 
         let msg = body.to_lowercase();
-        Ok(if msg.contains("submitted the writeup successfully") || msg.contains("correct") {
-            UploadVerdict::Submitted
-        } else if msg.contains("repeated writeup") {
-            UploadVerdict::Repeated
-        } else if msg.contains("something went wrong") {
-            UploadVerdict::Rejected
-        } else if msg.contains("not found") {
-            UploadVerdict::NotFound
-        } else {
-            UploadVerdict::Unknown(body.trim().to_string())
-        })
+        Ok(
+            if msg.contains("submitted the writeup successfully") || msg.contains("correct") {
+                UploadVerdict::Submitted
+            } else if msg.contains("repeated writeup") {
+                UploadVerdict::Repeated
+            } else if msg.contains("something went wrong") {
+                UploadVerdict::Rejected
+            } else if msg.contains("not found") {
+                UploadVerdict::NotFound
+            } else {
+                UploadVerdict::Unknown(body.trim().to_string())
+            },
+        )
     }
 }
 
@@ -134,11 +136,7 @@ pub fn parse_writeups(html: &str) -> Vec<Writeup> {
             continue;
         };
         let url = link.value().attr("href").unwrap_or("").to_string();
-        let format = link
-            .text()
-            .collect::<String>()
-            .trim()
-            .replace('!', "");
+        let format = link.text().collect::<String>().trim().replace('!', "");
         let language = row
             .select(&lang_sel)
             .next()
