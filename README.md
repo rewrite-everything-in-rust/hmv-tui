@@ -176,6 +176,12 @@ MEGA crypto implementation ported from [mega.py](https://github.com/odwyersoftwa
 
 ---
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
 Made with ❤️ by [Ouba](https://github.com/setyanoegraha).
 
 *Happy Hacking on HackMyVM!*

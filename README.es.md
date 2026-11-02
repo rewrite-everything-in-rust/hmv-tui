@@ -178,6 +178,12 @@ Implementación de criptografía MEGA portada de [mega.py](https://github.com/od
 
 ---
 
+## Licencia
+
+MIT — ver [LICENSE](LICENSE).
+
+---
+
 Hecho con ❤️ por [Ouba](https://github.com/setyanoegraha).
 
 *¡Happy Hacking en HackMyVM!*
